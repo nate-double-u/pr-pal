@@ -123,11 +123,22 @@ pub fn validate_scoring(config: &ScoringConfig) -> Result<(), Vec<String>> {
         ];
         for (name, value) in fields {
             if let Some(effect) = value {
-                if let Err(e) = Effect::parse(effect) {
-                    errors.push(format!(
-                        "scoring.since_my_review.{}: invalid '{}' - {}",
-                        name, effect, e
-                    ));
+                match Effect::parse(effect) {
+                    Err(e) => {
+                        errors.push(format!(
+                            "scoring.since_my_review.{}: invalid '{}' - {}",
+                            name, effect, e
+                        ));
+                    }
+                    // Flat-only: the engine applies these once, so per-unit
+                    // forms would silently change meaning.
+                    Ok(Effect::AddPerUnit(..)) | Ok(Effect::MultiplyPerUnit(..)) => {
+                        errors.push(format!(
+                            "scoring.since_my_review.{}: '{}' - 'per' effects are not supported here; use a flat '+N' or 'xN'",
+                            name, effect
+                        ));
+                    }
+                    Ok(_) => {}
                 }
             }
         }
@@ -793,5 +804,37 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("scoring.since_my_review.awaiting_author")));
+    }
+
+    // LOCKED: regression for per-unit since_my_review effects (pr-pal#2 Copilot review).
+    // These effects are flat-only; the engine applies them once, so per-unit
+    // forms must be rejected at startup instead of silently changing meaning.
+    #[test]
+    fn test_per_unit_since_my_review_effects_rejected() {
+        let config = ScoringConfig {
+            base_score: None,
+            age: None,
+            approvals: None,
+            size: None,
+            labels: None,
+            previously_reviewed: None,
+            draft: None,
+            since_my_review: Some(crate::scoring::SinceMyReviewScoring {
+                pushed: Some("x2 per 1h".to_string()),
+                mentioned: Some("+10 per 1d".to_string()),
+                review_requested: Some("x3".to_string()),
+                awaiting_author: None,
+            }),
+        };
+        let result = validate_scoring(&config);
+        assert!(result.is_err(), "per-unit effects must be rejected");
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 2, "only the two per-unit effects fail");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.pushed") && e.contains("per")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.mentioned") && e.contains("per")));
     }
 }
