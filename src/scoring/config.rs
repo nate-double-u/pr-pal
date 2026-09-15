@@ -73,6 +73,46 @@ pub struct ScoringConfig {
     /// Example: "x0.1" to deprioritize draft PRs
     #[serde(default)]
     pub draft: Option<String>,
+
+    /// Since-my-review factor: effect applied based on what happened after
+    /// the user's last activity (review or comment) on a PR they reviewed
+    #[serde(default)]
+    pub since_my_review: Option<SinceMyReviewScoring>,
+}
+
+/// Since-my-review scoring effects.
+///
+/// Applied only to PRs the user has already reviewed. Exactly one effect
+/// fires, chosen by what happened after the user's last activity:
+/// `pushed` > `mentioned` > `review_requested` > `awaiting_author`.
+///
+/// Example YAML:
+/// ```yaml
+/// since_my_review:
+///   pushed: "x5"
+///   mentioned: "x5"
+///   review_requested: "x3"
+///   awaiting_author: "x0.2"
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SinceMyReviewScoring {
+    /// New commits landed after the user's last activity
+    #[serde(default)]
+    pub pushed: Option<String>,
+
+    /// User was @-mentioned after their last activity
+    #[serde(default)]
+    pub mentioned: Option<String>,
+
+    /// Review was re-requested from the user after their last activity
+    #[serde(default)]
+    pub review_requested: Option<String>,
+
+    /// Nothing notable since the user's last activity (damp alternative for
+    /// setups that don't hide awaiting-author PRs via `suppress`)
+    #[serde(default)]
+    pub awaiting_author: Option<String>,
 }
 
 impl Default for ScoringConfig {
@@ -101,6 +141,7 @@ impl Default for ScoringConfig {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         }
     }
 }
@@ -128,6 +169,34 @@ pub fn merge_scoring_configs(
             .clone()
             .or_else(|| global.previously_reviewed.clone()),
         draft: query.draft.clone().or_else(|| global.draft.clone()),
+        since_my_review: merge_since_my_review(
+            global.since_my_review.as_ref(),
+            query.since_my_review.as_ref(),
+        ),
+    }
+}
+
+/// Merge SinceMyReviewScoring at field level, mirroring merge_size_configs:
+/// per-query set fields override, unset fields inherit from global.
+fn merge_since_my_review(
+    global: Option<&SinceMyReviewScoring>,
+    query: Option<&SinceMyReviewScoring>,
+) -> Option<SinceMyReviewScoring> {
+    match (query, global) {
+        (Some(q), Some(g)) => Some(SinceMyReviewScoring {
+            pushed: q.pushed.clone().or_else(|| g.pushed.clone()),
+            mentioned: q.mentioned.clone().or_else(|| g.mentioned.clone()),
+            review_requested: q
+                .review_requested
+                .clone()
+                .or_else(|| g.review_requested.clone()),
+            awaiting_author: q
+                .awaiting_author
+                .clone()
+                .or_else(|| g.awaiting_author.clone()),
+        }),
+        (Some(q), None) => Some(q.clone()),
+        (None, g) => g.cloned(),
     }
 }
 
@@ -397,6 +466,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: Some("x0.5".to_string()),
             draft: None,
+            since_my_review: None,
         };
 
         // Query only sets age — everything else should come from global
@@ -408,6 +478,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -433,6 +504,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -443,6 +515,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -466,6 +539,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         // Query has size with new buckets but no exclude
@@ -483,6 +557,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -511,6 +586,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         // Query has size with absent buckets (None = inherit)
@@ -525,6 +601,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -548,6 +625,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -561,6 +639,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -582,6 +661,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -608,6 +688,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -621,6 +702,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -647,6 +729,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -663,6 +746,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -690,6 +774,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -703,6 +788,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -731,6 +817,7 @@ draft: "x0.1"
             ]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -744,6 +831,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -769,6 +857,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -782,6 +871,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -802,6 +892,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -815,6 +906,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));
@@ -836,6 +928,7 @@ draft: "x0.1"
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let query = ScoringConfig {
@@ -846,6 +939,7 @@ draft: "x0.1"
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = merge_scoring_configs(&global, Some(&query));

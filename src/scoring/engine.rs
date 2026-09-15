@@ -1,6 +1,7 @@
 use super::config::ScoringConfig;
 use super::factors::Effect;
 use crate::github::types::PullRequest;
+use crate::review_state::{review_state, ReviewState};
 
 #[derive(Debug, Clone)]
 pub struct FactorContribution {
@@ -10,13 +11,13 @@ pub struct FactorContribution {
     pub after: f64,          // Score after this factor
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScoreBreakdown {
     pub base_score: f64,
     pub factors: Vec<FactorContribution>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScoreResult {
     pub score: f64,
     pub incomplete: bool,
@@ -164,6 +165,44 @@ pub fn calculate_score(pr: &PullRequest, config: &ScoringConfig) -> ScoreResult 
         }
     }
 
+    // Apply since_my_review factor (at most one state effect fires)
+    if let Some(ref smr) = config.since_my_review {
+        // The resurface valve is a visibility concern (suppress config), so
+        // scoring computes the state without it and never sees Stalled.
+        let state = review_state(&pr.signals, chrono::Utc::now(), None);
+        let matched: Option<(&String, &str)> = match state {
+            ReviewState::Pushed => smr
+                .pushed
+                .as_ref()
+                .map(|e| (e, "commits pushed since your last activity")),
+            ReviewState::Mentioned => smr
+                .mentioned
+                .as_ref()
+                .map(|e| (e, "you were mentioned since your last activity")),
+            ReviewState::ReviewRequested => smr
+                .review_requested
+                .as_ref()
+                .map(|e| (e, "review re-requested since your last activity")),
+            ReviewState::AwaitingAuthor => smr
+                .awaiting_author
+                .as_ref()
+                .map(|e| (e, "no activity since your review")),
+            ReviewState::NotReviewed | ReviewState::Stalled => None,
+        };
+        if let Some((effect_str, reason)) = matched {
+            if let Ok(effect) = Effect::parse(effect_str) {
+                let before = score;
+                score = effect.apply(score, 1);
+                factors.push(FactorContribution {
+                    label: "Since My Review".to_string(),
+                    description: format!("{} -> {}", reason, effect_str),
+                    before,
+                    after: score,
+                });
+            }
+        }
+    }
+
     // Floor at zero
     ScoreResult {
         score: score.max(0.0),
@@ -229,7 +268,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::{LabelEffect, SizeBucket, SizeConfig};
+    use crate::scoring::{LabelEffect, SinceMyReviewScoring, SizeBucket, SizeConfig};
     use chrono::{Duration as ChronoDuration, Utc};
 
     fn sample_pr(age_hours: i64, approvals: u32, size: u64) -> PullRequest {
@@ -248,6 +287,7 @@ mod tests {
             labels: vec![],
             user_has_reviewed: false,
             filtered_size: None,
+            signals: Default::default(),
         }
     }
 
@@ -264,6 +304,7 @@ mod tests {
                 labels: None,
                 previously_reviewed: None,
                 draft: None,
+                since_my_review: None,
             },
         );
         assert_eq!(result.score, 100.0);
@@ -283,6 +324,7 @@ mod tests {
                 labels: None,
                 previously_reviewed: None,
                 draft: None,
+                since_my_review: None,
             },
         );
         assert_eq!(result.score, 105.0); // 100 + 5*1
@@ -301,6 +343,7 @@ mod tests {
                 labels: None,
                 previously_reviewed: None,
                 draft: None,
+                since_my_review: None,
             },
         );
         assert_eq!(result.score, 0.0);
@@ -319,6 +362,7 @@ mod tests {
                 labels: None,
                 previously_reviewed: None,
                 draft: None,
+                since_my_review: None,
             },
         );
         assert_eq!(result.score, 50.0);
@@ -343,6 +387,7 @@ mod tests {
                 labels: None,
                 previously_reviewed: None,
                 draft: None,
+                since_my_review: None,
             },
         );
         assert_eq!(result.score, 200.0);
@@ -373,6 +418,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -404,6 +450,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -435,6 +482,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -457,6 +505,7 @@ mod tests {
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -479,6 +528,7 @@ mod tests {
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -503,6 +553,7 @@ mod tests {
             ]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -531,6 +582,7 @@ mod tests {
             ]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -554,6 +606,7 @@ mod tests {
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -573,6 +626,7 @@ mod tests {
             labels: None,
             previously_reviewed: Some("x0.5".to_string()),
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -592,6 +646,7 @@ mod tests {
             labels: None,
             previously_reviewed: Some("x0.5".to_string()),
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -623,6 +678,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -653,6 +709,7 @@ mod tests {
             }]),
             previously_reviewed: Some("x0.5".to_string()),
             draft: None,
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -674,6 +731,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: Some("x0.1".to_string()),
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
@@ -693,9 +751,121 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: Some("x0.1".to_string()),
+            since_my_review: None,
         };
 
         let result = calculate_score(&pr, &config);
         assert_eq!(result.score, 100.0);
+    }
+
+    // --- since_my_review factor ---
+
+    fn since_config(smr: SinceMyReviewScoring) -> ScoringConfig {
+        ScoringConfig {
+            base_score: Some(100.0),
+            age: None,
+            approvals: None,
+            size: None,
+            labels: None,
+            previously_reviewed: None,
+            draft: None,
+            since_my_review: Some(smr),
+        }
+    }
+
+    fn full_since_scoring() -> SinceMyReviewScoring {
+        SinceMyReviewScoring {
+            pushed: Some("x5".to_string()),
+            mentioned: Some("x4".to_string()),
+            review_requested: Some("x3".to_string()),
+            awaiting_author: Some("x0.2".to_string()),
+        }
+    }
+
+    fn reviewed_pr(review_days_ago: i64) -> PullRequest {
+        let mut pr = sample_pr(24 * 30, 0, 100);
+        pr.user_has_reviewed = true;
+        pr.signals.my_last_review_at = Some(Utc::now() - ChronoDuration::days(review_days_ago));
+        pr
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Author pushes after my review must apply the pushed effect.
+    #[test]
+    fn test_since_my_review_pushed_applies_effect() {
+        let mut pr = reviewed_pr(3);
+        pr.signals.last_commit_at = Some(Utc::now() - ChronoDuration::days(1));
+
+        let result = calculate_score(&pr, &since_config(full_since_scoring()));
+        assert_eq!(result.score, 500.0);
+        assert!(result
+            .breakdown
+            .factors
+            .iter()
+            .any(|f| f.label == "Since My Review" && f.before == 100.0 && f.after == 500.0));
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Mentions after my review must apply the mentioned effect.
+    #[test]
+    fn test_since_my_review_mentioned_applies_effect() {
+        let mut pr = reviewed_pr(3);
+        pr.signals.mentioned_at = Some(Utc::now() - ChronoDuration::days(1));
+
+        let result = calculate_score(&pr, &since_config(full_since_scoring()));
+        assert_eq!(result.score, 400.0);
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Re-requests must apply the review_requested effect.
+    #[test]
+    fn test_since_my_review_review_requested_applies_effect() {
+        let mut pr = reviewed_pr(3);
+        pr.signals.review_requested_at = Some(Utc::now() - ChronoDuration::days(1));
+
+        let result = calculate_score(&pr, &since_config(full_since_scoring()));
+        assert_eq!(result.score, 300.0);
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Quiet reviewed PRs must apply the awaiting_author effect.
+    #[test]
+    fn test_since_my_review_awaiting_author_damps() {
+        let pr = reviewed_pr(3);
+
+        let result = calculate_score(&pr, &since_config(full_since_scoring()));
+        assert_eq!(result.score, 20.0);
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // PRs I never reviewed must not enter the cycle.
+    #[test]
+    fn test_since_my_review_ignores_unreviewed_prs() {
+        let mut pr = sample_pr(24, 0, 100);
+        pr.signals.last_commit_at = Some(Utc::now() - ChronoDuration::days(1));
+
+        let result = calculate_score(&pr, &since_config(full_since_scoring()));
+        assert_eq!(result.score, 100.0);
+        assert!(result.breakdown.factors.is_empty());
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Unset since_my_review keys must not change scores.
+    #[test]
+    fn test_since_my_review_unset_key_is_no_op() {
+        let mut pr = reviewed_pr(3);
+        pr.signals.last_commit_at = Some(Utc::now() - ChronoDuration::days(1));
+
+        let smr = SinceMyReviewScoring {
+            pushed: None,
+            mentioned: Some("x4".to_string()),
+            review_requested: None,
+            awaiting_author: None,
+        };
+        // State is Pushed; pushed has no effect configured, and no other
+        // state's effect may fire in its place.
+        let result = calculate_score(&pr, &since_config(smr));
+        assert_eq!(result.score, 100.0);
+        assert!(result.breakdown.factors.is_empty());
     }
 }

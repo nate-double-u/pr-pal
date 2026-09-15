@@ -1,17 +1,61 @@
 use crate::config::Config;
 use crate::github::cache::{CacheConfig, DiskCache};
 use crate::github::types::PullRequest;
+use crate::review_state::{review_state, ReviewState};
 use crate::scoring::ScoreResult;
 use crate::snooze::SnoozeState;
+use crate::snooze::SuppressPolicy;
 use crate::tui::theme::{Theme, ThemeColors};
 use crate::version_check::VersionStatus;
 use chrono::{DateTime, Utc};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 const MAX_UNDO: usize = 50;
+
+/// Merge manually snoozed and suppressed (awaiting author) PRs into one
+/// display list, sorted by score descending (ties: older PR first). Returns
+/// the merged list and the set of suppressed URLs for tagging.
+pub fn merge_snoozed_lists(
+    snoozed: Vec<(PullRequest, ScoreResult)>,
+    suppressed: Vec<(PullRequest, ScoreResult)>,
+) -> (Vec<(PullRequest, ScoreResult)>, HashSet<String>) {
+    let suppressed_urls: HashSet<String> =
+        suppressed.iter().map(|(pr, _)| pr.url.clone()).collect();
+    let mut merged = snoozed;
+    merged.extend(suppressed);
+    merged.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.created_at.cmp(&b.0.created_at))
+    });
+    (merged, suppressed_urls)
+}
+
+/// Compute the review-cycle state for each PR (keyed by URL), used to tag
+/// Active rows with the reason a PR resurfaced. With a suppress policy the
+/// tag reflects the effective wake (same rules as partitioning); without one
+/// it falls back to the raw review state.
+pub fn compute_review_states(
+    prs: &[(PullRequest, ScoreResult)],
+    policy: Option<&SuppressPolicy>,
+    now: DateTime<Utc>,
+) -> HashMap<String, ReviewState> {
+    prs.iter()
+        .map(|(pr, _)| {
+            let state = match policy {
+                Some(policy) => {
+                    crate::snooze::filter::effective_review_state(&pr.signals, policy, now)
+                }
+                None => review_state(&pr.signals, now, None),
+            };
+            (pr.url.clone(), state)
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
@@ -32,11 +76,18 @@ pub enum UndoAction {
     Snoozed {
         url: String,
         title: String,
+        /// The row was suppressed (awaiting author) before the manual snooze;
+        /// undo restores suppression instead of activating the row.
+        was_suppressed: bool,
     },
     Unsnoozed {
         url: String,
         title: String,
         until: Option<DateTime<Utc>>,
+        /// The row resolved to awaiting-author when unsnoozed, so it stayed
+        /// in the Snoozed view as suppressed; undo drops the marker instead
+        /// of moving rows.
+        became_suppressed: bool,
     },
     Resnooze {
         url: String,
@@ -47,7 +98,12 @@ pub enum UndoAction {
 
 pub struct App {
     pub active_prs: Vec<(PullRequest, ScoreResult)>,
+    /// Manually snoozed + suppressed (awaiting author) PRs, merged for display
     pub snoozed_prs: Vec<(PullRequest, ScoreResult)>,
+    /// URLs of PRs suppressed as awaiting-author (subset of snoozed_prs)
+    pub suppressed_urls: HashSet<String>,
+    /// Review-cycle state per PR URL, for wake-reason tags
+    pub review_states: HashMap<String, ReviewState>,
     pub table_state: ratatui::widgets::TableState,
     pub current_view: View,
     pub snooze_state: SnoozeState,
@@ -98,6 +154,8 @@ impl App {
         Self {
             active_prs,
             snoozed_prs,
+            suppressed_urls: HashSet::new(),
+            review_states: HashMap::new(),
             table_state,
             current_view: View::Active,
             snooze_state,
@@ -143,6 +201,8 @@ impl App {
         Self {
             active_prs: Vec::new(),
             snoozed_prs: Vec::new(),
+            suppressed_urls: HashSet::new(),
+            review_states: HashMap::new(),
             table_state: ratatui::widgets::TableState::default(),
             current_view: View::Active,
             snooze_state,
@@ -292,7 +352,10 @@ impl App {
             }
         };
 
-        // Capture old snooze_until before overwriting (needed for undo on re-snooze)
+        // Capture old snooze_until before overwriting (needed for undo on
+        // re-snooze). is_snoozed, not contains_key: a stale expired entry is
+        // not an active manual snooze.
+        let was_manually_snoozed = self.snooze_state.is_snoozed(&url);
         let old_until = self
             .snooze_state
             .snoozed_entries()
@@ -316,6 +379,7 @@ impl App {
                 self.push_undo(UndoAction::Snoozed {
                     url: url.clone(),
                     title: title.clone(),
+                    was_suppressed: false,
                 });
 
                 // Move PR from active to snoozed
@@ -325,15 +389,27 @@ impl App {
                 self.show_flash(format!("Snoozed: {} (z to undo)", title));
             }
             View::Snoozed => {
-                // Push re-snooze to undo stack with previous duration
-                self.push_undo(UndoAction::Resnooze {
-                    url: url.clone(),
-                    title: title.clone(),
-                    previous_until: old_until,
-                });
+                if was_manually_snoozed {
+                    // Push re-snooze to undo stack with previous duration
+                    self.push_undo(UndoAction::Resnooze {
+                        url: url.clone(),
+                        title: title.clone(),
+                        previous_until: old_until,
+                    });
 
-                // PR stays in snoozed list -- no move needed
-                self.show_flash(format!("Re-snoozed: {} (z to undo)", title));
+                    // PR stays in snoozed list -- no move needed
+                    self.show_flash(format!("Re-snoozed: {} (z to undo)", title));
+                } else {
+                    // Suppressed (awaiting author) row: this is a fresh
+                    // manual snooze, which takes precedence over suppression
+                    let was_suppressed = self.suppressed_urls.remove(&url);
+                    self.push_undo(UndoAction::Snoozed {
+                        url: url.clone(),
+                        title: title.clone(),
+                        was_suppressed,
+                    });
+                    self.show_flash(format!("Snoozed: {} (z to undo)", title));
+                }
             }
         }
 
@@ -369,6 +445,14 @@ impl App {
             None => return,
         };
 
+        // Suppressed rows aren't manually snoozed (an expired entry doesn't
+        // count); there is nothing to undo. They resurface on author updates,
+        // mentions, or re-requests.
+        if self.suppressed_urls.contains(&url) && !self.snooze_state.is_snoozed(&url) {
+            self.show_flash("Awaiting author since your review; updates resurface it".to_string());
+            return;
+        }
+
         // Unsnooze
         self.snooze_state.unsnooze(&url);
 
@@ -378,18 +462,45 @@ impl App {
             return;
         }
 
+        // With the manual snooze gone, the row is governed by the policy
+        // again: if its current signals still resolve to awaiting-author it
+        // stays in the Snoozed view as suppressed rather than jumping to
+        // Active until the next refresh.
+        let became_suppressed = self.still_suppressed_now(&url).unwrap_or(false);
+
         // Push to undo stack
         self.push_undo(UndoAction::Unsnoozed {
             url: url.clone(),
             title: title.clone(),
             until,
+            became_suppressed,
         });
 
-        // Move PR from snoozed to active
-        self.move_pr_between_lists(&url, false);
+        if became_suppressed {
+            self.suppressed_urls.insert(url.clone());
+            self.show_flash(format!("Unsnoozed: {} (awaiting author; z to undo)", title));
+        } else {
+            // Move PR from snoozed to active
+            self.move_pr_between_lists(&url, false);
+            self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
+        }
+    }
 
-        // Show flash message
-        self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
+    /// Whether a snoozed row would still be suppressed (awaiting author)
+    /// given its current signals and the active policy. Refreshes update
+    /// signals while undo entries survive them, so callers re-evaluate
+    /// rather than trusting snapshots. `None` when the policy or row cannot
+    /// be resolved; callers fall back to their snapshot (or activate).
+    fn still_suppressed_now(&self, url: &str) -> Option<bool> {
+        let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
+            .ok()
+            .flatten()?;
+        let (pr, _) = self.snoozed_prs.iter().find(|(pr, _)| pr.url == url)?;
+        Some(crate::snooze::is_suppressed_by_policy(
+            &pr.signals,
+            &policy,
+            Utc::now(),
+        ))
     }
 
     /// Undo the last snooze or unsnooze action
@@ -403,7 +514,11 @@ impl App {
         };
 
         match action {
-            UndoAction::Snoozed { url, title } => {
+            UndoAction::Snoozed {
+                url,
+                title,
+                was_suppressed,
+            } => {
                 // Undo a snooze: unsnooze the PR
                 self.snooze_state.unsnooze(&url);
 
@@ -415,12 +530,25 @@ impl App {
                     return;
                 }
 
-                // Move PR back from snoozed to active
-                self.move_pr_between_lists(&url, false);
-
-                self.show_flash(format!("Undid snooze: {}", title));
+                // Re-evaluate against current signals for every removed
+                // snooze; the snapshot only stands when policy or row can't
+                // be resolved. A row can become awaiting-author (or wake)
+                // while snoozed.
+                if self.still_suppressed_now(&url).unwrap_or(was_suppressed) {
+                    self.suppressed_urls.insert(url.clone());
+                    self.show_flash(format!("Undid snooze: {} (awaiting author)", title));
+                } else {
+                    // Move PR back from snoozed to active
+                    self.move_pr_between_lists(&url, false);
+                    self.show_flash(format!("Undid snooze: {}", title));
+                }
             }
-            UndoAction::Unsnoozed { url, title, until } => {
+            UndoAction::Unsnoozed {
+                url,
+                title,
+                until,
+                became_suppressed,
+            } => {
                 // Undo an unsnooze: re-snooze the PR
                 self.snooze_state.snooze(url.clone(), until);
 
@@ -432,8 +560,14 @@ impl App {
                     return;
                 }
 
-                // Move PR back from active to snoozed
-                self.move_pr_between_lists(&url, true);
+                if became_suppressed {
+                    // The row never left the Snoozed view; drop the marker so
+                    // it shows as manually snoozed again.
+                    self.suppressed_urls.remove(&url);
+                } else {
+                    // Move PR back from active to snoozed
+                    self.move_pr_between_lists(&url, true);
+                }
 
                 self.show_flash(format!("Undid unsnooze: {}", title));
             }
@@ -541,15 +675,33 @@ impl App {
     }
 
     /// Update PRs with fresh data from fetch
-    pub fn update_prs(
-        &mut self,
-        active: Vec<(PullRequest, ScoreResult)>,
-        snoozed: Vec<(PullRequest, ScoreResult)>,
-        rate_limit_remaining: Option<u64>,
-    ) {
+    pub fn update_prs(&mut self, fetched: crate::fetch::FetchedPrs) {
+        let crate::fetch::FetchedPrs {
+            active,
+            suppressed,
+            snoozed,
+            rate_limit_remaining,
+        } = fetched;
+
+        // Suppressed PRs share the Snoozed view, tagged "awaiting author"
+        let (snoozed_merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
+
+        // Wake-reason tags derived from the same effective policy that
+        // partitioning uses. Snoozed rows are included: a row that wakes
+        // while manually snoozed keeps its tag when it later moves to
+        // Active in-memory (unsnooze/undo) before the next refresh.
+        let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
+            .ok()
+            .flatten();
+        let now = Utc::now();
+        let mut review_states = compute_review_states(&active, policy.as_ref(), now);
+        review_states.extend(compute_review_states(&snoozed_merged, policy.as_ref(), now));
+        self.review_states = review_states;
+
         // Replace PR lists
         self.active_prs = active;
-        self.snoozed_prs = snoozed;
+        self.snoozed_prs = snoozed_merged;
+        self.suppressed_urls = suppressed_urls;
 
         // Update rate limit info
         self.rate_limit_remaining = rate_limit_remaining;
@@ -578,11 +730,19 @@ impl App {
 
         // Show flash message
         let active_count = self.active_prs.len();
-        let snoozed_count = self.snoozed_prs.len();
-        self.show_flash(format!(
-            "Refreshed ({} active, {} snoozed)",
-            active_count, snoozed_count
-        ));
+        let awaiting_count = self.suppressed_urls.len();
+        let snoozed_count = self.snoozed_prs.len() - awaiting_count;
+        if awaiting_count > 0 {
+            self.show_flash(format!(
+                "Refreshed ({} active, {} awaiting author, {} snoozed)",
+                active_count, awaiting_count, snoozed_count
+            ));
+        } else {
+            self.show_flash(format!(
+                "Refreshed ({} active, {} snoozed)",
+                active_count, snoozed_count
+            ));
+        }
     }
 
     /// Advance the loading spinner animation frame
@@ -607,5 +767,435 @@ impl App {
     /// Check if the update banner should be shown
     pub fn has_update_banner(&self) -> bool {
         matches!(self.version_status, VersionStatus::UpdateAvailable { .. })
+    }
+}
+
+// LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+// All tests in this module are locked. Snoozed-view merge and wake-state computation for row tags.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review_state::{ReviewSignals, ReviewState};
+    use chrono::{Duration, TimeZone};
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    fn test_pr(url: &str, signals: ReviewSignals) -> PullRequest {
+        PullRequest {
+            title: format!("PR {}", url),
+            number: 1,
+            author: "author".to_string(),
+            repo: "o/r".to_string(),
+            url: url.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            additions: 1,
+            deletions: 1,
+            approvals: 0,
+            draft: false,
+            labels: vec![],
+            user_has_reviewed: false,
+            filtered_size: None,
+            signals,
+        }
+    }
+
+    fn scored(url: &str, score: f64) -> (PullRequest, ScoreResult) {
+        (
+            test_pr(url, ReviewSignals::default()),
+            ScoreResult {
+                score,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn test_app(name: &str) -> App {
+        App::new(
+            Vec::new(),
+            Vec::new(),
+            SnoozeState::new(),
+            std::env::temp_dir().join(format!(
+                "pr-bro-app-test-{}-{}.json",
+                std::process::id(),
+                name
+            )),
+            Config {
+                scoring: None,
+                queries: vec![],
+                auto_refresh_interval: 300,
+                theme: "dark".to_string(),
+                suppress: None,
+            },
+            CacheConfig { enabled: false },
+            None,
+            false,
+            Some("me".to_string()),
+            true,
+            Theme::Dark,
+        )
+    }
+
+    /// Seed an app with one suppressed (awaiting author) row in the Snoozed
+    /// view, selected.
+    fn app_with_suppressed_row(name: &str, url: &str) -> App {
+        let mut app = test_app(name);
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.suppressed_urls.insert(url.to_string());
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+        app
+    }
+
+    // LOCKED: regression for lost wake tags on snoozed rows (pr-pal#2 Copilot review).
+    // A manually snoozed PR can wake during a refresh; when it later moves to
+    // Active in-memory (unsnooze/undo) its wake tag must still render, so
+    // update_prs must compute review states for Snoozed rows too.
+    #[test]
+    fn update_prs_computes_wake_states_for_snoozed_rows() {
+        let url = "https://x/snoozed-woken";
+        let mut app = test_app("wake-states-snoozed");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+
+        // Manually snoozed row whose author pushed after my review.
+        let mut signals = ReviewSignals {
+            my_last_review_at: Some(Utc::now() - Duration::days(5)),
+            ..Default::default()
+        };
+        signals.last_commit_at = Some(Utc::now() - Duration::days(1));
+        let snoozed = vec![(test_pr(url, signals), ScoreResult::default())];
+
+        app.update_prs(crate::fetch::FetchedPrs {
+            active: vec![],
+            suppressed: vec![],
+            snoozed,
+            rate_limit_remaining: None,
+        });
+
+        assert_eq!(
+            app.review_states.get(url),
+            Some(&ReviewState::Pushed),
+            "snoozed rows must carry their wake state"
+        );
+    }
+
+    // LOCKED: regression for expired-snooze guards (pr-pal#2 Copilot review).
+    // An expired manual snooze entry must not let `u` activate a row the
+    // partition still classifies as suppressed (awaiting author).
+    #[test]
+    fn unsnooze_guard_holds_when_stale_expired_entry_exists() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("unsnooze-guard", url);
+        // Stale entry: expired an hour ago, not yet cleaned up.
+        app.snooze_state
+            .snooze(url.to_string(), Some(Utc::now() - Duration::hours(1)));
+
+        app.unsnooze_selected();
+
+        assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
+        assert!(
+            app.active_prs.is_empty(),
+            "suppressed row must not activate"
+        );
+        assert!(app.undo_stack.is_empty());
+    }
+
+    // LOCKED: regression for expired-snooze guards (pr-pal#2 Copilot review).
+    // Snoozing a suppressed row that has a stale expired entry is a fresh
+    // manual snooze: the suppression marker must clear, not the re-snooze path.
+    #[test]
+    fn snoozing_suppressed_row_with_stale_entry_clears_marker() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("stale-resnooze", url);
+        app.snooze_state
+            .snooze(url.to_string(), Some(Utc::now() - Duration::hours(1)));
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+
+        app.confirm_snooze_input();
+
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "marker must clear on fresh snooze"
+        );
+        assert!(matches!(
+            app.undo_stack.front(),
+            Some(UndoAction::Snoozed { .. })
+        ));
+    }
+
+    // LOCKED: regression for undo of suppressed-row snooze (pr-pal#2 Copilot review).
+    // Undoing a manual snooze of a suppressed row must restore suppression,
+    // not activate the row: no wake event occurred.
+    #[test]
+    fn undo_snooze_of_suppressed_row_restores_suppression() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("undo-suppressed", url);
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+        assert!(!app.suppressed_urls.contains(url), "precondition");
+
+        app.undo_last();
+
+        assert!(
+            !app.snooze_state.is_snoozed(url),
+            "manual snooze must be undone"
+        );
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression must be restored"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
+        assert!(app.active_prs.is_empty());
+    }
+
+    // LOCKED: regression for unsnooze bypassing suppression (pr-pal#2 Copilot review).
+    // Removing a manual snooze must re-evaluate the row: if its current
+    // signals still resolve to awaiting-author, it stays in the Snoozed view
+    // as suppressed instead of jumping to Active until the next refresh.
+    #[test]
+    fn unsnooze_keeps_awaiting_author_row_suppressed() {
+        let url = "https://x/manual-snoozed";
+        let mut app = test_app("unsnooze-reeval");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        // Reviewed 5 days ago, nothing since: policy says awaiting author.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+        app.snooze_state.snooze(url.to_string(), None);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.unsnooze_selected();
+
+        assert!(!app.snooze_state.is_snoozed(url), "manual snooze removed");
+        assert!(
+            app.active_prs.is_empty(),
+            "awaiting-author row must not activate"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row stays in the Snoozed view");
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression marker must be added"
+        );
+    }
+
+    // LOCKED: regression for unsnooze bypassing suppression (pr-pal#2 Copilot review).
+    // Undoing that unsnooze restores the manual snooze without duplicating
+    // the row or leaving the suppression marker behind.
+    #[test]
+    fn undo_unsnooze_of_awaiting_author_row_restores_manual_snooze() {
+        let url = "https://x/manual-snoozed-undo";
+        let mut app = test_app("unsnooze-reeval-undo");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+        app.snooze_state.snooze(url.to_string(), None);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.unsnooze_selected();
+        app.undo_last();
+
+        assert!(app.snooze_state.is_snoozed(url), "manual snooze restored");
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "suppression marker must be removed; the manual snooze wins again"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row must not duplicate");
+        assert!(app.active_prs.is_empty());
+    }
+
+    // LOCKED: regression for undo trusting a stale non-suppressed snapshot (pr-pal#2 Copilot review).
+    // A row snoozed from Active can become awaiting-author during a refresh
+    // (e.g. my review arrived). Undoing the snooze must re-evaluate current
+    // signals for every removed snooze, not only ones snoozed while
+    // suppressed.
+    #[test]
+    fn undo_snooze_reevaluates_rows_snoozed_from_active() {
+        let url = "https://x/active-row";
+        let mut app = test_app("undo-reeval-active");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.active_prs = vec![scored(url, 1.0)];
+        app.current_view = View::Active;
+        app.table_state.select(Some(0));
+
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+
+        // A refresh delivered new signals: I reviewed it, nothing since.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(1));
+
+        app.undo_last();
+
+        assert!(!app.snooze_state.is_snoozed(url));
+        assert!(
+            app.active_prs.is_empty(),
+            "awaiting-author row must not activate"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row stays in the Snoozed view");
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression marker must be added"
+        );
+    }
+
+    // LOCKED: regression for stale undo suppression snapshot (pr-pal#2 Copilot review).
+    // Undo must re-evaluate the row's current signals: if a wake event
+    // arrived (via refresh) while the row was manually snoozed, undoing the
+    // snooze activates it instead of restoring a stale awaiting-author state.
+    #[test]
+    fn undo_snooze_reevaluates_signals_and_activates_woken_row() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("undo-reeval", url);
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![
+                crate::config::WakeEvent::Push,
+                crate::config::WakeEvent::Mention,
+                crate::config::WakeEvent::ReviewRequest,
+            ],
+            resurface_after: "21d".to_string(),
+        });
+        // Reviewed 5 days ago, nothing since: genuinely suppressed.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+
+        // A refresh delivered new signals while snoozed: the author pushed.
+        app.snoozed_prs[0].0.signals.last_commit_at = Some(Utc::now() - Duration::hours(1));
+
+        app.undo_last();
+
+        assert!(!app.snooze_state.is_snoozed(url));
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "woken row must not be re-suppressed"
+        );
+        assert_eq!(app.active_prs.len(), 1, "woken row must activate");
+        assert!(app.snoozed_prs.is_empty());
+    }
+
+    #[test]
+    fn merge_snoozed_lists_sorts_by_score_and_tracks_suppressed() {
+        let snoozed = vec![scored("https://x/1", 50.0)];
+        let suppressed = vec![scored("https://x/2", 100.0), scored("https://x/3", 10.0)];
+
+        let (merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
+
+        let urls: Vec<&str> = merged.iter().map(|(pr, _)| pr.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://x/2", "https://x/1", "https://x/3"]);
+        assert!(suppressed_urls.contains("https://x/2"));
+        assert!(suppressed_urls.contains("https://x/3"));
+        assert!(!suppressed_urls.contains("https://x/1"));
+    }
+
+    #[test]
+    fn merge_snoozed_lists_breaks_score_ties_by_age() {
+        let mut older = scored("https://x/old", 50.0);
+        older.0.created_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let newer = scored("https://x/new", 50.0);
+
+        let (merged, _) = merge_snoozed_lists(vec![newer], vec![older]);
+
+        let urls: Vec<&str> = merged.iter().map(|(pr, _)| pr.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://x/old", "https://x/new"]);
+    }
+
+    #[test]
+    fn compute_review_states_maps_urls_to_states() {
+        let now = ts("2026-09-10T00:00:00Z");
+        let pushed = (
+            test_pr(
+                "https://x/pushed",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    last_commit_at: Some(ts("2026-09-02T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+        let not_reviewed = scored("https://x/plain", 1.0);
+
+        let states = compute_review_states(&[pushed, not_reviewed], None, now);
+
+        assert_eq!(states.get("https://x/pushed"), Some(&ReviewState::Pushed));
+        assert_eq!(
+            states.get("https://x/plain"),
+            Some(&ReviewState::NotReviewed)
+        );
+    }
+
+    #[test]
+    fn compute_review_states_applies_valve() {
+        let now = ts("2026-09-30T00:00:00Z");
+        let stalled = (
+            test_pr(
+                "https://x/stalled",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+
+        let policy = crate::snooze::SuppressPolicy {
+            wake_on: vec![],
+            resurface_after: Some(Duration::days(21)),
+        };
+        let states = compute_review_states(&[stalled], Some(&policy), now);
+
+        assert_eq!(states.get("https://x/stalled"), Some(&ReviewState::Stalled));
+    }
+
+    // LOCKED: regression for policy-aware wake tags (pr-pal#2 Copilot review).
+    // Tags must reflect the effective policy: with wake_on [mention], a PR
+    // that was pushed then mentioned tags as (mentioned), not (updated).
+    #[test]
+    fn compute_review_states_respects_wake_policy() {
+        let now = ts("2026-09-10T00:00:00Z");
+        let pr = (
+            test_pr(
+                "https://x/mixed",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    last_commit_at: Some(ts("2026-09-02T00:00:00Z")),
+                    mentioned_at: Some(ts("2026-09-03T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+        let policy = crate::snooze::SuppressPolicy {
+            wake_on: vec![crate::config::WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+
+        let states = compute_review_states(&[pr], Some(&policy), now);
+
+        assert_eq!(states.get("https://x/mixed"), Some(&ReviewState::Mentioned));
     }
 }

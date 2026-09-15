@@ -221,6 +221,13 @@ async fn main() {
         }
     }
 
+    // Validate suppress config (resurface_after duration syntax)
+    if let Err(e) = pr_bro::snooze::suppress_policy(config.suppress.as_ref()) {
+        eprintln!("Suppress config error:");
+        eprintln!("  - {}", e);
+        std::process::exit(EXIT_CONFIG);
+    }
+
     // Load snooze state (before credential setup - no network required)
     let snooze_path = pr_bro::snooze::get_snooze_path();
     let mut snooze_state = match pr_bro::snooze::load_snooze_state(&snooze_path) {
@@ -350,7 +357,7 @@ async fn main() {
     // Non-interactive path: fetch and score PRs, with auth re-prompt on failure
     let mut current_client = client;
     let mut current_auth_username = auth_username;
-    let (active_scored, snoozed_scored, _rate_limit) = loop {
+    let fetched = loop {
         match pr_bro::fetch::fetch_and_score_prs(
             &current_client,
             &config,
@@ -416,8 +423,11 @@ async fn main() {
     // Non-interactive path: use existing CLI behavior
     // Select which list to use based on command
     let scored_prs = match &command {
-        Commands::List { show_snoozed: true } | Commands::Unsnooze { .. } => snoozed_scored,
-        _ => active_scored,
+        // Snoozed view includes suppressed PRs (awaiting author) so nothing
+        // hidden from Active is invisible. Unsnooze must index the exact
+        // same list the user saw in `list --show-snoozed`.
+        Commands::List { show_snoozed: true } | Commands::Unsnooze { .. } => fetched.snoozed_view(),
+        _ => fetched.active,
     };
 
     // Route based on subcommand

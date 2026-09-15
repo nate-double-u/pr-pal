@@ -69,6 +69,8 @@ Use `pr-bro --help` for all command-line options. Press `?` in the TUI for keybo
 
 **Snooze PRs** to hide them temporarily. Press `s` to snooze for a custom duration or indefinitely. Snoozed PRs live in a separate tab and don't clutter your main list.
 
+**Review-cycle awareness** (optional) hides PRs you've already reviewed while the ball is in the author's court, then resurfaces them, tagged and optionally score-boosted, when the author pushes, you're mentioned, or your review is re-requested. A safety valve resurfaces anything quiet for too long. See [docs/configuration.md](docs/configuration.md#awaiting-author-suppression).
+
 **Score breakdown** shows exactly how a PR's score was calculated. See which factors contributed most. Press `b` on any PR to open the detail view.
 
 **Light and dark themes** adapt to your terminal. PR Bro auto-detects your terminal background and picks the right color palette.

@@ -113,6 +113,37 @@ pub fn validate_scoring(config: &ScoringConfig) -> Result<(), Vec<String>> {
         }
     }
 
+    // Validate since_my_review effects
+    if let Some(ref smr) = config.since_my_review {
+        let fields = [
+            ("pushed", &smr.pushed),
+            ("mentioned", &smr.mentioned),
+            ("review_requested", &smr.review_requested),
+            ("awaiting_author", &smr.awaiting_author),
+        ];
+        for (name, value) in fields {
+            if let Some(effect) = value {
+                match Effect::parse(effect) {
+                    Err(e) => {
+                        errors.push(format!(
+                            "scoring.since_my_review.{}: invalid '{}' - {}",
+                            name, effect, e
+                        ));
+                    }
+                    // Flat-only: the engine applies these once, so per-unit
+                    // forms would silently change meaning.
+                    Ok(Effect::AddPerUnit(..)) | Ok(Effect::MultiplyPerUnit(..)) => {
+                        errors.push(format!(
+                            "scoring.since_my_review.{}: '{}' - 'per' effects are not supported here; use a flat '+N' or 'xN'",
+                            name, effect
+                        ));
+                    }
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -194,6 +225,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -208,6 +240,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -222,6 +255,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -239,6 +273,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -256,6 +291,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -279,6 +315,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -296,6 +333,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -337,6 +375,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -363,6 +402,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -394,6 +434,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -423,6 +464,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -449,6 +491,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -478,6 +521,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -507,6 +551,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -530,6 +575,7 @@ mod tests {
             ]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -547,6 +593,7 @@ mod tests {
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -568,6 +615,7 @@ mod tests {
             }]),
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -586,6 +634,7 @@ mod tests {
             labels: None,
             previously_reviewed: Some("x0.5".to_string()),
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -600,6 +649,7 @@ mod tests {
             labels: None,
             previously_reviewed: Some("invalid".to_string()),
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -624,6 +674,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         assert!(validate_scoring(&config).is_ok());
     }
@@ -644,6 +695,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -668,6 +720,7 @@ mod tests {
             labels: None,
             previously_reviewed: None,
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
@@ -692,10 +745,96 @@ mod tests {
             ]),
             previously_reviewed: Some("invalid".to_string()), // Error 5
             draft: None,
+            since_my_review: None,
         };
         let result = validate_scoring(&config);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 5);
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Valid since_my_review effects must pass startup validation.
+    #[test]
+    fn test_valid_since_my_review() {
+        let config = ScoringConfig {
+            base_score: None,
+            age: None,
+            approvals: None,
+            size: None,
+            labels: None,
+            previously_reviewed: None,
+            draft: None,
+            since_my_review: Some(crate::scoring::SinceMyReviewScoring {
+                pushed: Some("x5".to_string()),
+                mentioned: Some("x4".to_string()),
+                review_requested: Some("x3".to_string()),
+                awaiting_author: Some("x0.2".to_string()),
+            }),
+        };
+        assert!(validate_scoring(&config).is_ok());
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Invalid since_my_review effects must fail at startup.
+    #[test]
+    fn test_invalid_since_my_review_effects() {
+        let config = ScoringConfig {
+            base_score: None,
+            age: None,
+            approvals: None,
+            size: None,
+            labels: None,
+            previously_reviewed: None,
+            draft: None,
+            since_my_review: Some(crate::scoring::SinceMyReviewScoring {
+                pushed: Some("bad".to_string()),
+                mentioned: None,
+                review_requested: None,
+                awaiting_author: Some("also bad".to_string()),
+            }),
+        };
+        let result = validate_scoring(&config);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 2);
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.pushed") && e.contains("bad")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.awaiting_author")));
+    }
+
+    // LOCKED: regression for per-unit since_my_review effects (pr-pal#2 Copilot review).
+    // These effects are flat-only; the engine applies them once, so per-unit
+    // forms must be rejected at startup instead of silently changing meaning.
+    #[test]
+    fn test_per_unit_since_my_review_effects_rejected() {
+        let config = ScoringConfig {
+            base_score: None,
+            age: None,
+            approvals: None,
+            size: None,
+            labels: None,
+            previously_reviewed: None,
+            draft: None,
+            since_my_review: Some(crate::scoring::SinceMyReviewScoring {
+                pushed: Some("x2 per 1h".to_string()),
+                mentioned: Some("+10 per 1d".to_string()),
+                review_requested: Some("x3".to_string()),
+                awaiting_author: None,
+            }),
+        };
+        let result = validate_scoring(&config);
+        assert!(result.is_err(), "per-unit effects must be rejected");
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 2, "only the two per-unit effects fail");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.pushed") && e.contains("per")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("scoring.since_my_review.mentioned") && e.contains("per")));
     }
 }

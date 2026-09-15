@@ -38,6 +38,16 @@ scoring:
       effect: "x0.5"
   previously_reviewed: "x2.5"  # Previously reviewed PRs get a boost
   draft: "x0.1"               # Deprioritize draft PRs
+  since_my_review:            # React to what happened after your last review
+    pushed: "x5"              # Author pushed new commits
+    mentioned: "x5"           # You were @-mentioned
+    review_requested: "x3"    # Your review was re-requested
+
+# Hide reviewed PRs while the ball is in the author's court (optional)
+suppress:
+  awaiting_author: true
+  wake_on: [push, mention, review_request]
+  resurface_after: 21d        # Safety valve; "never" disables it
 
 # Queries to execute (at least one required)
 queries:
@@ -153,6 +163,22 @@ Optional. Applies a score effect when a PR is marked as a draft. Useful for depr
 draft: "x0.1"   # Heavily deprioritize draft PRs
 ```
 
+### Since My Review
+
+Optional. Applies a score effect based on what has happened since your last review of a PR. Complements [awaiting-author suppression](#awaiting-author-suppression): suppression controls *whether* a reviewed PR is shown, this factor controls *how high* it ranks once it resurfaces.
+
+```yaml
+since_my_review:
+  pushed: "x5"             # Author pushed commits after your review
+  mentioned: "x5"          # You were @-mentioned after your review
+  review_requested: "x3"   # Your review was re-requested
+  awaiting_author: "x0.2"  # Nothing happened yet (rarely needed with suppression on)
+```
+
+All fields are optional flat effects (`+N` or `xN`). At most one applies per PR, checked in this order: pushed, mentioned, review_requested, awaiting_author. PRs you have not reviewed are unaffected.
+
+The signals come from each PR's timeline, fetched only for PRs you have reviewed and only when this factor or `suppress` is configured.
+
 ## Effect Syntax Summary
 
 | Syntax | Meaning |
@@ -164,7 +190,7 @@ draft: "x0.1"   # Heavily deprioritize draft PRs
 | `+N per M` | Add N points per M units (approvals only) |
 | `xN per M` | Multiply by N per M units (approvals only) |
 
-Labels, previously_reviewed, and draft use flat effects (`+N` or `xN`), not per-unit effects.
+Labels, previously_reviewed, draft, and since_my_review use flat effects (`+N` or `xN`), not per-unit effects.
 
 ## Per-Query Scoring
 
@@ -220,6 +246,33 @@ In this example, the "urgent" query:
 
 YAML merge keys (`<<:`) are supported by the YAML parser for reducing duplication within your config file. This is a YAML feature processed when reading the file, independent of the runtime merge that combines global and per-query scoring. Note that because PR Bro validates config structure strictly (`deny_unknown_fields`), YAML anchors must be placed inside fields that expect the anchored structure, not at the top level. For advanced YAML anchor/merge-key usage, refer to the [YAML specification](https://yaml.org/type/merge.html).
 
+## Awaiting-Author Suppression
+
+Optional top-level `suppress` block. After you review a PR, it usually can't move until the author acts; suppression hides it from the Active list so your queue only shows PRs you can act on. Suppressed PRs appear in the Snoozed tab marked "awaiting author".
+
+```yaml
+suppress:
+  awaiting_author: true                        # Feature switch (default: true when block present)
+  wake_on: [push, mention, review_request]     # Events that resurface a PR (default: all three)
+  resurface_after: 21d                         # Safety valve; "never" disables (default: 21d)
+```
+
+A suppressed PR returns to the Active list when, after your last activity on it (review or comment):
+
+- **push**: the author pushes new commits (or force-pushes)
+- **mention**: you are @-mentioned
+- **review_request**: your review is re-requested
+- the **safety valve** expires: nothing happened for `resurface_after`, so it resurfaces tagged "(stalled)" rather than staying invisible forever
+
+Resurfaced rows are tagged with the wake reason: `(updated)`, `(mentioned)`, `(re-requested)`, or `(stalled)`.
+
+Notes:
+
+- Suppression is derived from GitHub state on each refresh; nothing is written to your snooze file. Commenting on a PR (a nudge) re-arms the safety valve.
+- Manual snooze always wins: snoozing a suppressed PR converts it into a regular snooze.
+- Omitting the `suppress` block (or `awaiting_author: false`) disables the feature.
+- `unsnooze` does not apply to suppressed PRs; they come back via wake events.
+
 ## Theme
 
 PR Bro supports light and dark color themes. The default is `auto`, which detects your terminal's background color at startup and selects the appropriate palette.
@@ -242,5 +295,6 @@ PR Bro validates your configuration at startup with clear error messages:
 - **Empty label names** are rejected
 - **Invalid glob patterns** in `size.exclude` are caught (e.g., unclosed character classes like `[invalid`)
 - **Invalid label effects**, **invalid previously_reviewed effects**, and **invalid draft effects** are caught at startup
+- **Invalid since_my_review effects** and **invalid suppress.resurface_after durations** are caught at startup
 
 Validation errors will show exactly what's wrong and where, so you can fix configuration issues quickly.

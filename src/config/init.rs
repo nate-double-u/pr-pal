@@ -269,6 +269,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
             labels,
             previously_reviewed,
             draft,
+            since_my_review: None,
         }
     } else {
         ScoringConfig::default()
@@ -349,6 +350,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
         queries,
         auto_refresh_interval: 300,
         theme: "auto".to_string(),
+        suppress: None,
     };
 
     let yaml = serde_saphyr::to_string(&config)
