@@ -5,10 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0](https://github.com/nate-double-u/pr-pal/compare/v0.5.1...v1.0.0) - 2026-09-15
+## 1.0.0 - 2026-09-15
 
 First release of PR Pal, a fork of [PR Bro](https://github.com/toniperic/pr-bro).
 The rename follows [Inclusive Naming Initiative](https://inclusivenaming.org/) guidance.
+For the full delta from upstream, see the
+[v0.5.1...v1.0.0 comparison](https://github.com/nate-double-u/pr-pal/compare/v0.5.1...v1.0.0).
 
 ### Added
 
