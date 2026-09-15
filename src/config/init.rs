@@ -77,7 +77,7 @@ fn validate_approvals_str(s: &str) -> Result<(), String> {
 /// Otherwise, prompts the user with the default config path.
 pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
     println!();
-    typewriter("PR Bro Configuration Wizard");
+    typewriter("PR Pal Configuration Wizard");
     println!("===========================");
     println!();
 
