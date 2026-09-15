@@ -58,6 +58,33 @@ fn need_signals_for_query(suppress_enabled: bool, merged_scoring: &ScoringConfig
     suppress_enabled || merged_scoring.since_my_review.is_some()
 }
 
+/// Deduplicate PRs by URL, in configuration order.
+///
+/// The same PR can match several queries, and queries complete in network
+/// order. The copy from the first *configured* query wins (the documented
+/// contract), so its enrichment signals and scoring config apply
+/// deterministically. The stable sort preserves search ranking within each
+/// query.
+fn dedup_in_config_order(
+    mut all_prs: Vec<(PullRequest, usize)>,
+) -> (Vec<PullRequest>, HashMap<String, usize>) {
+    all_prs.sort_by_key(|(_, query_idx)| *query_idx);
+    let mut seen_urls = HashSet::new();
+    let mut pr_to_query_index = HashMap::new();
+    let unique_prs = all_prs
+        .into_iter()
+        .filter_map(|(pr, query_idx)| {
+            if seen_urls.insert(pr.url.clone()) {
+                pr_to_query_index.insert(pr.url.clone(), query_idx);
+                Some(pr)
+            } else {
+                None
+            }
+        })
+        .collect();
+    (unique_prs, pr_to_query_index)
+}
+
 /// Fetch PRs from all configured queries, deduplicate, score, and split into
 /// active, suppressed (awaiting author), and snoozed lists.
 ///
@@ -149,21 +176,9 @@ pub async fn fetch_and_score_prs(
         anyhow::bail!("All queries failed. Check your network connection and GitHub token.");
     }
 
-    // Deduplicate PRs by URL (same PR may appear in multiple queries)
-    // First match wins: track both unique PRs and their query index
-    let mut seen_urls = HashSet::new();
-    let mut pr_to_query_index = HashMap::new();
-    let unique_prs: Vec<_> = all_prs
-        .into_iter()
-        .filter_map(|(pr, query_idx)| {
-            if seen_urls.insert(pr.url.clone()) {
-                pr_to_query_index.insert(pr.url.clone(), query_idx);
-                Some(pr)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Deduplicate PRs by URL (same PR may appear in multiple queries);
+    // first configured query wins regardless of completion order
+    let (unique_prs, pr_to_query_index) = dedup_in_config_order(all_prs);
 
     if verbose {
         buffered_eprintln!("After deduplication: {} unique PRs", unique_prs.len());
@@ -290,6 +305,28 @@ mod tests {
             .map(|(pr, _)| pr.number)
             .collect();
         assert_eq!(numbers, vec![1, 3, 2], "sorted by score across both lists");
+    }
+
+    // LOCKED: regression for nondeterministic dedup (pr-pal#2 Copilot review).
+    // Queries finish in network order, but when a PR matches several queries
+    // the copy from the first *configured* query must win, so its enrichment
+    // signals and scoring config apply deterministically.
+    #[test]
+    fn dedup_prefers_first_configured_query_over_completion_order() {
+        // Query 1 completed first: its copy arrives ahead of query 0's.
+        let mut from_q1 = scored(5, 0.0).0;
+        from_q1.title = "from-q1".to_string();
+        let mut from_q0 = scored(5, 0.0).0;
+        from_q0.title = "from-q0".to_string();
+        let only_q1 = scored(7, 0.0).0;
+
+        let (unique, index_map) =
+            dedup_in_config_order(vec![(from_q1, 1), (only_q1, 1), (from_q0, 0)]);
+
+        let kept = unique.iter().find(|pr| pr.number == 5).expect("kept");
+        assert_eq!(kept.title, "from-q0", "first configured query wins");
+        assert_eq!(index_map.get(&kept.url), Some(&0));
+        assert_eq!(unique.len(), 2, "non-duplicates pass through");
     }
 
     #[test]
