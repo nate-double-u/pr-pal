@@ -14,7 +14,7 @@ cargo test
 Run with a GitHub token:
 
 ```bash
-export PR_BRO_GH_TOKEN=ghp_your_token_here
+export PR_PAL_GH_TOKEN=ghp_your_token_here
 cargo run
 ```
 
@@ -26,7 +26,7 @@ Required scopes:
 - `repo` — for private repositories
 - `public_repo` — for public repositories only (if you don't need private repo access)
 
-The app checks for the `PR_BRO_GH_TOKEN` environment variable first. If not set, you'll be prompted interactively at startup.
+The app checks for the `PR_PAL_GH_TOKEN` environment variable first. If not set, you'll be prompted interactively at startup.
 
 ## Code Style
 

@@ -70,10 +70,6 @@ struct Cli {
     #[arg(long, global = true)]
     clear_cache: bool,
 
-    /// Disable version update checking
-    #[arg(long, global = true)]
-    no_version_check: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -341,7 +337,6 @@ async fn main() {
             cache_handle,
             cli.verbose,
             auth_username.clone(),
-            cli.no_version_check,
             theme,
         );
 

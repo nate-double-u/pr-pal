@@ -2787,7 +2787,6 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rustls",
- "semver",
  "serde",
  "serde-saphyr",
  "serde_json",

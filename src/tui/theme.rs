@@ -57,11 +57,6 @@ pub struct ThemeColors {
     // Scrollbar colors
     pub scrollbar_thumb: Color,
     pub scrollbar_track: Color,
-
-    // Update banner colors
-    pub banner_bg: Color,
-    pub banner_fg: Color,
-    pub banner_key: Color,
 }
 
 impl ThemeColors {
@@ -103,9 +98,6 @@ impl ThemeColors {
             popup_bg: Color::Indexed(234),
             scrollbar_thumb: Color::Indexed(244),
             scrollbar_track: Color::Indexed(236),
-            banner_bg: Color::Rgb(50, 50, 120),
-            banner_fg: Color::White,
-            banner_key: Color::Yellow,
         }
     }
 
@@ -150,9 +142,6 @@ impl ThemeColors {
             scrollbar_thumb: Color::Indexed(240),
             scrollbar_track: Color::Indexed(253),
             // Banner adjusted
-            banner_bg: Color::Rgb(180, 180, 230), // Lighter blue-purple
-            banner_fg: Color::Black,              // Dark text on light banner
-            banner_key: Color::Indexed(88),       // Dark red for highlight
         }
     }
 

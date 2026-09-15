@@ -35,7 +35,7 @@ Installing upstream `pr-bro` via Homebrew, Cargo, or binary download gets you th
 cargo run --release
 ```
 
-On first run, PR Pal will prompt you with a series of questions to set up your configuration. It will also ask for your GitHub token interactively. To skip the token prompt, set the `PR_BRO_GH_TOKEN` environment variable.
+On first run, PR Pal will prompt you with a series of questions to set up your configuration. It will also ask for your GitHub token interactively. To skip the token prompt, set the `PR_PAL_GH_TOKEN` environment variable.
 
 For the full list of configuration options, see the [Configuration Reference](docs/configuration.md).
 

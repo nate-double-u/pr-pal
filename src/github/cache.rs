@@ -260,7 +260,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("pr-bro-test-cache-{}-{}", test_name, timestamp))
+        std::env::temp_dir().join(format!("pr-pal-test-cache-{}-{}", test_name, timestamp))
     }
 
     #[test]
