@@ -201,6 +201,12 @@ impl ScoreTiers {
         let warm = mean(scores);
         let mut hot = warm;
         let mut head: Vec<f64> = scores.iter().copied().filter(|s| *s > hot).collect();
+        // An empty head with several rows means every score ties the mean:
+        // there is no outlier to isolate. A single row is still the top of
+        // its own distribution and stays hot.
+        if head.is_empty() && scores.len() > 1 {
+            hot = f64::INFINITY;
+        }
         for _ in 0..2 {
             if head.is_empty() {
                 break;
@@ -336,6 +342,19 @@ mod tests {
         // An empty pool colors nothing.
         let tiers = ScoreTiers::from_scores(&[]);
         assert_eq!(colors.tier_color(5.0, &tiers), Color::Reset);
+    }
+
+    // LOCKED: regression for all-red equal-score pools (pr-pal#3 Copilot review).
+    // When every score in a multi-row pool ties, the head/tail head is empty
+    // and hot collapses onto warm; nothing stands out, so no row may be red.
+    // Tied rows are the baseline: they land green.
+    #[test]
+    fn equal_score_pools_have_no_outliers() {
+        let colors = ThemeColors::dark();
+        let tiers = ScoreTiers::from_scores(&[50.0, 50.0, 50.0]);
+        assert_eq!(colors.tier_color(50.0, &tiers), colors.score_low);
+        let tiers = ScoreTiers::from_scores(&[7.5, 7.5]);
+        assert_eq!(colors.tier_color(7.5, &tiers), colors.score_low);
     }
 
     // LOCKED: regression for zero-score tier coloring (pr-pal#3 Copilot review).
