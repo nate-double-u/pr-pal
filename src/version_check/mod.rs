@@ -126,6 +126,7 @@ pub fn load_cached_status(current_version: &str) -> VersionStatus {
 
 #[cfg(test)]
 mod tests {
+    // LOCKED: regression for fork version-check disable (pr-pal#6 Copilot review).
     // Tripwire: the check queries upstream's (toniperic/pr-bro) release feed,
     // which says nothing about this fork's versions. Keep it disabled so an
     // upstream merge cannot quietly re-enable phoning home. Flip ENABLED only

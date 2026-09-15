@@ -5,8 +5,8 @@
 Get up and running:
 
 ```bash
-git clone git@github.com:toniperic/pr-bro.git
-cd pr-bro
+git clone git@github.com:nate-double-u/pr-pal.git
+cd pr-pal
 cargo build
 cargo test
 ```
