@@ -473,13 +473,22 @@ async fn enrich_pr(
     }
 }
 
-/// True when any error in the chain looks like a GitHub rate limit.
+/// True when an error is a GitHub rate limit.
 ///
-/// Uses the alternate format so context wrappers (e.g. "Failed to fetch PR
-/// timeline") don't mask the underlying 403 / rate-limit message.
+/// Prefers the structured octocrab error (recoverable through anyhow
+/// context): primary and secondary limits both carry an explicit "rate
+/// limit" message, and secondary limits may use HTTP 429. A bare 403 is
+/// permissions/forbidden, not a rate limit, and "403" appearing in error
+/// text (URLs, status lines) proves nothing, so status text is never
+/// matched.
 fn is_rate_limit_error(err: &anyhow::Error) -> bool {
-    let chain = format!("{err:#}");
-    chain.contains("rate limit") || chain.contains("403")
+    if let Some(octocrab::Error::GitHub { source, .. }) = err.downcast_ref::<octocrab::Error>() {
+        return source.status_code.as_u16() == 429
+            || source.message.to_lowercase().contains("rate limit");
+    }
+    // Fallback for non-GitHub-typed errors: the explicit phrase only, over
+    // the full chain so context wrappers don't mask it.
+    format!("{err:#}").to_lowercase().contains("rate limit")
 }
 
 /// Helper function for concurrent PR enrichment
@@ -1262,6 +1271,84 @@ mod tests {
         assert_eq!(
             enriched.signals.my_last_review_at, None,
             "anchor still clears so partial results fail open"
+        );
+    }
+
+    // LOCKED: regression for 403-as-rate-limit misclassification (pr-pal#2 Copilot review).
+    // "403" appearing incidentally in an error chain (URLs containing PR
+    // number 403, quoted status lines) is not evidence of rate limiting;
+    // only the explicit rate-limit message or HTTP 429 is.
+    #[test]
+    fn rate_limit_predicate_ignores_incidental_403_text() {
+        let err = anyhow!(
+            "error sending request for url (https://api.github.com/repos/o/r/issues/403/timeline)"
+        );
+        assert!(!is_rate_limit_error(&err));
+
+        let err = anyhow!("API rate limit exceeded for user");
+        assert!(is_rate_limit_error(&err));
+    }
+
+    // LOCKED: regression for 403-as-rate-limit misclassification (pr-pal#2 Copilot review).
+    // A plain forbidden response (permissions, SAML, integration scope) is
+    // not a rate limit: it must fail open for that PR only, leaving the
+    // shared stop flag untouched so remaining PRs still enrich.
+    #[tokio::test]
+    async fn enrichment_plain_403_does_not_trip_stop_flag() {
+        let server = MockServer::start().await;
+        mount_common_enrichment_mocks(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "message": "Resource not accessible by personal access token",
+                "documentation_url": "https://docs.github.com/rest"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let pr = PullRequest {
+            title: "t".to_string(),
+            number: 5,
+            author: "a".to_string(),
+            repo: "o/r".to_string(),
+            url: "https://github.com/o/r/pull/5".to_string(),
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-01T00:00:00Z"),
+            additions: 0,
+            deletions: 0,
+            approvals: 0,
+            draft: false,
+            labels: vec![],
+            user_has_reviewed: false,
+            filtered_size: None,
+            signals: Default::default(),
+        };
+
+        let rate_limited = Arc::new(AtomicBool::new(false));
+        let enriched = enrich_pr_with_rate_limit_check(
+            client,
+            pr,
+            Arc::clone(&rate_limited),
+            Some("me".to_string()),
+            None,
+            true,
+        )
+        .await;
+
+        assert!(
+            !rate_limited.load(Ordering::Relaxed),
+            "plain 403 must not be treated as a rate limit"
+        );
+        assert_eq!(
+            enriched.signals.my_last_review_at, None,
+            "affected PR still fails open"
         );
     }
 
