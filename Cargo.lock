@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "pr-pal"
-version = "0.5.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",

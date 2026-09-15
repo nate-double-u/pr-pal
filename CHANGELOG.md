@@ -5,14 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
+
+[compare](https://github.com/nate-double-u/pr-pal/compare/v1.0.0...HEAD)
+
+## 1.0.0 - 2026-09-15
+
+[compare](https://github.com/nate-double-u/pr-pal/compare/v0.5.1...v1.0.0)
+
+First release of PR Pal, a fork of [PR Bro](https://github.com/toniperic/pr-bro).
+The rename follows [Inclusive Naming Initiative](https://inclusivenaming.org/) guidance.
 
 ### Added
 
 - `scoring.since_my_review`: score PRs by what happened after your last review (pushed / mentioned / review_requested / awaiting_author)
 - `suppress`: hide reviewed PRs awaiting the author; wake on push, mention, or re-request, with a `resurface_after` safety valve
+- Score tier colors: outliers red, above-average yellow, rest green, with log-scaled bar fill
+- Navigation keys: PgUp/PgDn, g/G, and vim-style H/M/L
 
-## [0.5.1](https://github.com/toniperic/pr-bro/compare/v0.5.0...v0.5.1) - 2026-04-24
+### Changed
+
+- Renamed crate, binary, config dir (`~/.config/pr-pal`), cache dir, and token env var (`PR_PAL_GH_TOKEN`); pr-bro configs parse unchanged, `--no-version-check` accepted as a no-op
+- CI runs against `main`; dependabot moved to weekly
+
+### Removed
+
+- Upstream version check and update banner
+- Release automation (release-plz, Homebrew publishing); releases are manual tags
+
+## 0.5.1 - 2026-04-24
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.5.0...v0.5.1)
 
 ### Fixed
 
@@ -43,7 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(deps)* bump serde-saphyr from 0.0.21 to 0.0.22
 - *(deps)* bump clap from 4.5.60 to 4.6.0
 
-## [0.5.0](https://github.com/toniperic/pr-bro/compare/v0.4.2...v0.5.0) - 2026-03-10
+## 0.5.0 - 2026-03-10
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.4.2...v0.5.0)
 
 ### Added
 
@@ -53,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(deps)* bump webbrowser from 1.1.0 to 1.2.0
 
-## [0.4.2](https://github.com/toniperic/pr-bro/compare/v0.4.1...v0.4.2) - 2026-03-05
+## 0.4.2 - 2026-03-05
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.4.1...v0.4.2)
 
 ### Fixed
 
@@ -69,7 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(deps)* bump chrono from 0.4.43 to 0.4.44
 - *(deps)* bump serde-saphyr from 0.0.19 to 0.0.20
 
-## [0.4.1](https://github.com/toniperic/pr-bro/compare/v0.4.0...v0.4.1) - 2026-02-20
+## 0.4.1 - 2026-02-20
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.4.0...v0.4.1)
 
 ### Fixed
 
@@ -87,7 +116,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - remove refactor commits from release-plz triggers
 - replace hardcoded help text padding with programmatic alignment
 
-## [0.4.0](https://github.com/toniperic/pr-bro/compare/v0.3.4...v0.4.0) - 2026-02-11
+## 0.4.0 - 2026-02-11
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.3.4...v0.4.0)
 
 ### Added
 
@@ -98,7 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - disable duplicate GitHub auto-generated release notes
 - replace theme constants with ThemeColors struct
 
-## [0.3.4](https://github.com/toniperic/pr-bro/compare/v0.3.3...v0.3.4) - 2026-02-10
+## 0.3.4 - 2026-02-10
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.3.3...v0.3.4)
 
 ### Fixed
 
@@ -111,26 +144,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(deps)* bump reqwest from 0.13.1 to 0.13.2
 - default query to review-requested:@me review:required is:open
 
-## [0.3.3](https://github.com/toniperic/pr-bro/compare/v0.3.2...v0.3.3) - 2026-02-08
+## 0.3.3 - 2026-02-08
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.3.2...v0.3.3)
 
 ### Fixed
 
 - prevent caching of truncated GitHub API responses
 - buffer stderr during TUI mode to prevent display corruption
 
-## [0.3.2](https://github.com/toniperic/pr-bro/compare/v0.3.1...v0.3.2) - 2026-02-08
+## 0.3.2 - 2026-02-08
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.3.1...v0.3.2)
 
 ### Fixed
 
 - suppress enrichment warnings that corrupt TUI display ([#57](https://github.com/toniperic/pr-bro/pull/57))
 
-## [0.3.1](https://github.com/toniperic/pr-bro/compare/v0.3.0...v0.3.1) - 2026-02-08
+## 0.3.1 - 2026-02-08
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.3.0...v0.3.1)
 
 ### Other
 
 - auto-evict stale cache entries on startup ([#55](https://github.com/toniperic/pr-bro/pull/55))
 
-## [0.3.0](https://github.com/toniperic/pr-bro/compare/v0.2.4...v0.3.0) - 2026-02-06
+## 0.3.0 - 2026-02-06
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.2.4...v0.3.0)
 
 ### Added
 
@@ -144,7 +185,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove downloads badge from README
 
-## [0.2.4](https://github.com/toniperic/pr-bro/compare/v0.2.3...v0.2.4) - 2026-02-05
+## 0.2.4 - 2026-02-05
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.2.3...v0.2.4)
 
 ### Fixed
 
@@ -157,7 +200,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(deps)* bump rpassword from 5.0.1 to 7.4.0
 - add Asciinema demo link to README
 
-## [0.2.3](https://github.com/toniperic/pr-bro/compare/v0.2.2...v0.2.3) - 2026-02-05
+## 0.2.3 - 2026-02-05
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.2.2...v0.2.3)
 
 ### Other
 
@@ -183,13 +228,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(quick-019)* simplify README quick start and remove Configuration section
 - *(tui)* rename "detail" nav hint to "breakdown"
 
-## [0.2.2](https://github.com/toniperic/pr-bro/compare/v0.2.1...v0.2.2) - 2026-02-04
+## 0.2.2 - 2026-02-04
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.2.1...v0.2.2)
 
 ### Other
 
 - bump minor version on feat commits in pre-stable releases ([#20](https://github.com/toniperic/pr-bro/pull/20))
 
-## [0.2.1](https://github.com/toniperic/pr-bro/compare/v0.2.0...v0.2.1) - 2026-02-04
+## 0.2.1 - 2026-02-04
+
+[compare](https://github.com/toniperic/pr-bro/compare/v0.2.0...v0.2.1)
 
 ### Added
 
