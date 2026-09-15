@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scoring.since_my_review`: score PRs by what happened after your last review (pushed / mentioned / review_requested / awaiting_author)
+- `suppress`: hide reviewed PRs awaiting the author; wake on push, mention, or re-request, with a `resurface_after` safety valve
+
 ## [0.5.1](https://github.com/toniperic/pr-bro/compare/v0.5.0...v0.5.1) - 2026-04-24
 
 ### Fixed
