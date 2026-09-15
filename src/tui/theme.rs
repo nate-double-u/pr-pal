@@ -190,21 +190,29 @@ pub struct ScoreTiers {
 
 impl ScoreTiers {
     pub fn from_scores(scores: &[f64]) -> Self {
-        if scores.is_empty() {
+        // Scoring multipliers are unbounded, so an overflowed +inf (or NaN)
+        // score must not poison the thresholds for the finite rows.
+        let finite: Vec<f64> = scores.iter().copied().filter(|s| s.is_finite()).collect();
+        if finite.is_empty() {
             return Self {
                 hot: f64::INFINITY,
                 warm: f64::INFINITY,
                 cold: f64::INFINITY,
             };
         }
-        let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
-        let warm = mean(scores);
+        // Running mean: immune to sum overflow from huge finite scores.
+        let mean = |xs: &[f64]| {
+            xs.iter()
+                .enumerate()
+                .fold(0.0, |m, (i, x)| m + (x - m) / (i as f64 + 1.0))
+        };
+        let warm = mean(&finite);
         let mut hot = warm;
-        let mut head: Vec<f64> = scores.iter().copied().filter(|s| *s > hot).collect();
+        let mut head: Vec<f64> = finite.iter().copied().filter(|s| *s > hot).collect();
         // An empty head with several rows means every score ties the mean:
         // there is no outlier to isolate. A single row is still the top of
         // its own distribution and stays hot.
-        if head.is_empty() && scores.len() > 1 {
+        if head.is_empty() && finite.len() > 1 {
             hot = f64::INFINITY;
         }
         for _ in 0..2 {
@@ -214,7 +222,7 @@ impl ScoreTiers {
             hot = mean(&head);
             head.retain(|s| *s > hot);
         }
-        let tail: Vec<f64> = scores.iter().copied().filter(|s| *s <= warm).collect();
+        let tail: Vec<f64> = finite.iter().copied().filter(|s| *s <= warm).collect();
         let cold = if tail.is_empty() { warm } else { mean(&tail) };
         Self { hot, warm, cold }
     }
@@ -230,7 +238,12 @@ const SCORE_WINDOW_DECADES: f64 = 3.0;
 /// other row. Intensity instead falls linearly with decades below the max:
 /// 1.0 at the max, 0.0 at 1000x below or worse.
 pub fn score_intensity(score: f64, max_score: f64) -> f64 {
-    if max_score <= 0.0 || score <= 0.0 {
+    // An overflowed score pins to full intensity; any other non-finite
+    // input renders an empty bar.
+    if score == f64::INFINITY {
+        return 1.0;
+    }
+    if !score.is_finite() || !max_score.is_finite() || max_score <= 0.0 || score <= 0.0 {
         return 0.0;
     }
     let decades_below = (max_score / score).log10();
@@ -355,6 +368,31 @@ mod tests {
         assert_eq!(colors.tier_color(50.0, &tiers), colors.score_low);
         let tiers = ScoreTiers::from_scores(&[7.5, 7.5]);
         assert_eq!(colors.tier_color(7.5, &tiers), colors.score_low);
+    }
+
+    // LOCKED: regression for non-finite score pools (pr-pal#3 Copilot review).
+    // MultiplyPerUnit scoring is unbounded powf: with PRs as old as GitHub
+    // (~18 years, ~158k hours) even multiply 1.005/hour overflows f64 to
+    // +inf, and huge finite scores can overflow a naive pool sum. Neither
+    // may poison the thresholds or bars of the finite rows.
+    #[test]
+    fn non_finite_scores_do_not_poison_the_pool() {
+        let colors = ThemeColors::dark();
+        // An overflowed row tops the queue; finite rows still tier normally.
+        let tiers = ScoreTiers::from_scores(&[f64::INFINITY, f64::NAN, 100.0, 10.0]);
+        assert_eq!(colors.tier_color(f64::INFINITY, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(100.0, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(10.0, &tiers), colors.score_low);
+        assert_eq!(colors.tier_color(f64::NAN, &tiers), Color::Reset);
+        // Huge finite scores must not overflow the mean into infinity.
+        let tiers = ScoreTiers::from_scores(&[1e308, 1e308, 1.0]);
+        assert_eq!(colors.tier_color(1e308, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(1.0, &tiers), colors.score_low);
+        // Bars: an overflowed score fills fully; an infinite max (avoided by
+        // pooling only finite maxes in the ui) blanks finite rows.
+        assert_eq!(score_intensity(f64::INFINITY, 100.0), 1.0);
+        assert_eq!(score_intensity(100.0, f64::INFINITY), 0.0);
+        assert_eq!(score_intensity(f64::NAN, 100.0), 0.0);
     }
 
     // LOCKED: regression for zero-score tier coloring (pr-pal#3 Copilot review).

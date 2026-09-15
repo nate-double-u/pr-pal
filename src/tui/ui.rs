@@ -162,7 +162,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     // colors tier against its distribution, so both read the same across
     // views and don't jump when a row is snoozed.
     let pool = app.score_pool();
-    let max_score = pool.iter().copied().fold(0.0_f64, f64::max);
+    let max_score = pool
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite())
+        .fold(0.0_f64, f64::max);
     let tiers = ScoreTiers::from_scores(&pool);
 
     // Store PR count and selected position for scrollbar (before borrowing table_state)
