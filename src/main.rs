@@ -423,20 +423,10 @@ async fn main() {
     // Non-interactive path: use existing CLI behavior
     // Select which list to use based on command
     let scored_prs = match &command {
-        Commands::List { show_snoozed: true } => {
-            // Snoozed view includes suppressed PRs (awaiting author) so
-            // nothing hidden from Active is invisible
-            let mut list = fetched.snoozed;
-            list.extend(fetched.suppressed);
-            list.sort_by(|a, b| {
-                b.1.score
-                    .partial_cmp(&a.1.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.created_at.cmp(&b.0.created_at))
-            });
-            list
-        }
-        Commands::Unsnooze { .. } => fetched.snoozed,
+        // Snoozed view includes suppressed PRs (awaiting author) so nothing
+        // hidden from Active is invisible. Unsnooze must index the exact
+        // same list the user saw in `list --show-snoozed`.
+        Commands::List { show_snoozed: true } | Commands::Unsnooze { .. } => fetched.snoozed_view(),
         _ => fetched.active,
     };
 

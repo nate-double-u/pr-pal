@@ -36,6 +36,23 @@ pub struct FetchedPrs {
     pub rate_limit_remaining: Option<u64>,
 }
 
+impl FetchedPrs {
+    /// The Snoozed view: manual snoozes and suppressed PRs merged and sorted
+    /// by score. `list --show-snoozed` and `unsnooze INDEX` must both use
+    /// this so displayed indices always match the ones unsnooze consumes.
+    pub fn snoozed_view(self) -> Vec<(PullRequest, ScoreResult)> {
+        let mut list = self.snoozed;
+        list.extend(self.suppressed);
+        list.sort_by(|a, b| {
+            b.1.score
+                .partial_cmp(&a.1.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.created_at.cmp(&b.0.created_at))
+        });
+        list
+    }
+}
+
 /// True when this query's PRs need review-cycle signals (timeline fetch).
 fn need_signals_for_query(suppress_enabled: bool, merged_scoring: &ScoringConfig) -> bool {
     suppress_enabled || merged_scoring.since_my_review.is_some()
@@ -227,6 +244,53 @@ pub async fn fetch_and_score_prs(
 mod tests {
     use super::*;
     use crate::scoring::config::SinceMyReviewScoring;
+    use chrono::Utc;
+
+    fn scored(number: u64, score: f64) -> (PullRequest, ScoreResult) {
+        (
+            PullRequest {
+                title: format!("PR {number}"),
+                number,
+                author: "a".to_string(),
+                repo: "o/r".to_string(),
+                url: format!("https://github.com/o/r/pull/{number}"),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                additions: 0,
+                deletions: 0,
+                approvals: 0,
+                draft: false,
+                labels: vec![],
+                user_has_reviewed: false,
+                filtered_size: None,
+                signals: Default::default(),
+            },
+            ScoreResult {
+                score,
+                ..Default::default()
+            },
+        )
+    }
+
+    // LOCKED: regression for unsnooze index misalignment (pr-pal#2 Copilot review).
+    // list --show-snoozed and unsnooze INDEX must both index this merged,
+    // sorted view; indexing raw fetched.snoozed shifted indices whenever a
+    // suppressed row sorted above a manual snooze.
+    #[test]
+    fn snoozed_view_merges_and_sorts_suppressed_with_snoozed() {
+        let fetched = FetchedPrs {
+            active: vec![],
+            suppressed: vec![scored(1, 500.0), scored(2, 5.0)],
+            snoozed: vec![scored(3, 50.0)],
+            rate_limit_remaining: None,
+        };
+        let numbers: Vec<u64> = fetched
+            .snoozed_view()
+            .iter()
+            .map(|(pr, _)| pr.number)
+            .collect();
+        assert_eq!(numbers, vec![1, 3, 2], "sorted by score across both lists");
+    }
 
     #[test]
     fn signals_needed_when_suppression_enabled() {
