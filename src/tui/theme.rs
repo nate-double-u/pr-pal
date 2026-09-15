@@ -156,22 +156,76 @@ impl ThemeColors {
         }
     }
 
-    /// Returns the appropriate color for a score based on its percentage of max score
-    pub fn score_color(&self, score: f64, max_score: f64) -> Color {
-        let percentage = if max_score > 0.0 {
-            (score / max_score) * 100.0
-        } else {
-            0.0
-        };
-
-        if percentage >= 70.0 {
+    /// Returns the color for a score's tier within the given distribution
+    pub fn tier_color(&self, score: f64, tiers: &ScoreTiers) -> Color {
+        if score >= tiers.hot {
             self.score_high
-        } else if percentage >= 40.0 {
+        } else if score > tiers.warm {
             self.score_mid
-        } else {
+        } else if score >= tiers.cold {
             self.score_low
+        } else {
+            Color::Reset
         }
     }
+}
+
+/// Distribution-based score tiers computed with head/tail breaks
+/// (Jiang 2013), a classification scheme for heavy-tailed data.
+///
+/// Scores are products of multiplicative modifiers, so a queue is heavy
+/// tailed: means split it far more honestly than fractions of the max.
+/// `warm` is the mean of all scores; `hot` recursively takes the mean of the
+/// above-mean head (up to three levels), converging on genuine outliers;
+/// `cold` is the mean of the at-or-below-mean tail, the noise floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreTiers {
+    hot: f64,
+    warm: f64,
+    cold: f64,
+}
+
+impl ScoreTiers {
+    pub fn from_scores(scores: &[f64]) -> Self {
+        if scores.is_empty() {
+            return Self {
+                hot: f64::INFINITY,
+                warm: f64::INFINITY,
+                cold: f64::INFINITY,
+            };
+        }
+        let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
+        let warm = mean(scores);
+        let mut hot = warm;
+        let mut head: Vec<f64> = scores.iter().copied().filter(|s| *s > hot).collect();
+        for _ in 0..2 {
+            if head.is_empty() {
+                break;
+            }
+            hot = mean(&head);
+            head.retain(|s| *s > hot);
+        }
+        let tail: Vec<f64> = scores.iter().copied().filter(|s| *s <= warm).collect();
+        let cold = if tail.is_empty() { warm } else { mean(&tail) };
+        Self { hot, warm, cold }
+    }
+}
+
+/// How many decades below the max score the display gradient spans.
+const SCORE_WINDOW_DECADES: f64 = 3.0;
+
+/// Relative intensity of a score in [0, 1], log-scaled.
+///
+/// Scores are products of multiplicative modifiers, so a list spreads across
+/// orders of magnitude and linear score/max lets one outlier flatten every
+/// other row. Intensity instead falls linearly with decades below the max:
+/// 1.0 at the max, 0.0 at 1000x below or worse.
+pub fn score_intensity(score: f64, max_score: f64) -> f64 {
+    if max_score <= 0.0 || score <= 0.0 {
+        return 0.0;
+    }
+    let decades_below = (max_score / score).log10();
+    (1.0 - decades_below / SCORE_WINDOW_DECADES).clamp(0.0, 1.0)
 }
 
 /// Resolve theme from config string ("dark", "light", "auto")
@@ -189,5 +243,95 @@ fn detect_terminal_theme() -> Theme {
     match terminal_light::luma() {
         Ok(luma) if luma > 0.5 => Theme::Light,
         _ => Theme::Dark, // Detection failed or dark background -> default dark
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intensity_is_log_scaled_over_three_decades() {
+        let max = 191_200.0;
+        // At the max: full intensity.
+        assert!((score_intensity(max, max) - 1.0).abs() < 1e-9);
+        // ~3x below max is still near-tied in multiplicative terms.
+        assert!(score_intensity(62_600.0, max) > 0.8);
+        // One decade below: two thirds.
+        assert!((score_intensity(19_120.0, max) - 2.0 / 3.0).abs() < 1e-9);
+        // Three decades below: floor.
+        assert!(score_intensity(191.2, max).abs() < 1e-9);
+        // Beyond the window clamps to zero, never negative.
+        assert_eq!(score_intensity(1.0, max), 0.0);
+    }
+
+    #[test]
+    fn intensity_handles_degenerate_inputs() {
+        assert_eq!(score_intensity(0.0, 100.0), 0.0);
+        assert_eq!(score_intensity(-5.0, 100.0), 0.0);
+        assert_eq!(score_intensity(50.0, 0.0), 0.0);
+        assert_eq!(score_intensity(50.0, -1.0), 0.0);
+        // A score above max clamps to full rather than overflowing.
+        assert_eq!(score_intensity(200.0, 100.0), 1.0);
+    }
+
+    // LOCKED: regression for score gradient collapse under outliers (pr-pal feedback).
+    // Head/tail tiers: only genuine outliers go red. With a 191.8k outlier,
+    // 62.7k is yellow (it was red under both linear percent-of-max and a fixed
+    // log window), and the below-tail-mean noise floor is uncolored.
+    #[test]
+    fn tier_colors_isolate_outliers_and_fade_the_tail() {
+        let colors = ThemeColors::dark();
+        // Real outlier-day distribution (thousands omitted).
+        let pool = [
+            191.8, 62.7, 53.0, 52.6, 31.5, 26.8, 20.8, 18.4, 18.2, 16.2, 15.8, 15.0, 15.0, 14.8,
+            13.9, 13.4, 13.0, 12.9, 12.9, 11.4, 10.7, 10.1, 9.4, 9.2, 8.3, 7.6, 7.3, 5.7, 4.8, 4.6,
+            3.6, 3.4, 2.9, 2.7, 2.6, 2.5, 2.1, 1.8, 1.7, 1.6, 1.5, 1.4, 1.1, 1.1, 0.9, 0.7,
+        ];
+        let tiers = ScoreTiers::from_scores(&pool);
+        // hot = 90.025: the outlier alone is red.
+        assert_eq!(colors.tier_color(191.8, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(62.7, &tiers), colors.score_mid);
+        // warm = 16.074: above the mean is yellow, at or below is not.
+        assert_eq!(colors.tier_color(16.2, &tiers), colors.score_mid);
+        assert_eq!(colors.tier_color(15.8, &tiers), colors.score_low);
+        // cold = 6.872: at or above the tail mean is green, below is uncolored.
+        assert_eq!(colors.tier_color(7.3, &tiers), colors.score_low);
+        assert_eq!(colors.tier_color(5.7, &tiers), Color::Reset);
+        assert_eq!(colors.tier_color(0.7, &tiers), Color::Reset);
+    }
+
+    #[test]
+    fn tiers_split_smooth_lists_into_small_head() {
+        let colors = ThemeColors::dark();
+        // A no-outlier day: hot = 16.622, warm = 6.592, cold = 2.869.
+        let pool = [
+            26.6, 20.8, 18.3, 15.0, 15.0, 14.8, 13.3, 12.9, 12.9, 10.6, 10.6, 10.0, 9.2, 7.9, 7.5,
+            7.3, 7.0, 6.9, 6.3, 5.7, 5.7, 4.8, 4.6, 4.5, 4.1, 4.1, 3.7, 3.6, 3.4, 3.1, 2.9, 2.7,
+            2.6, 2.6, 2.5, 2.1, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.1, 1.1, 1.1, 0.92, 0.684,
+        ];
+        let tiers = ScoreTiers::from_scores(&pool);
+        assert_eq!(colors.tier_color(26.6, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(18.3, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(15.0, &tiers), colors.score_mid);
+        assert_eq!(colors.tier_color(6.9, &tiers), colors.score_mid);
+        assert_eq!(colors.tier_color(6.3, &tiers), colors.score_low);
+        assert_eq!(colors.tier_color(2.9, &tiers), colors.score_low);
+        assert_eq!(colors.tier_color(2.7, &tiers), Color::Reset);
+    }
+
+    #[test]
+    fn tiers_handle_tiny_and_empty_pools() {
+        let colors = ThemeColors::dark();
+        // Two rows: the leader is red, the other stays green (not uncolored).
+        let tiers = ScoreTiers::from_scores(&[100.0, 10.0]);
+        assert_eq!(colors.tier_color(100.0, &tiers), colors.score_high);
+        assert_eq!(colors.tier_color(10.0, &tiers), colors.score_low);
+        // A single row is the top of its own distribution.
+        let tiers = ScoreTiers::from_scores(&[42.0]);
+        assert_eq!(colors.tier_color(42.0, &tiers), colors.score_high);
+        // An empty pool colors nothing.
+        let tiers = ScoreTiers::from_scores(&[]);
+        assert_eq!(colors.tier_color(5.0, &tiers), Color::Reset);
     }
 }

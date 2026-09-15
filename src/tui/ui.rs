@@ -1,6 +1,6 @@
 use crate::review_state::ReviewState;
 use crate::tui::app::{App, InputMode, View};
-use crate::tui::theme::ThemeColors;
+use crate::tui::theme::{score_intensity, ScoreTiers, ThemeColors};
 use crate::version_check::VersionStatus;
 use chrono::{Datelike, Local};
 use ratatui::layout::Margin;
@@ -158,11 +158,12 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Calculate max score for bar scaling
-    let max_score = prs
-        .iter()
-        .map(|(_, result)| result.score)
-        .fold(0.0_f64, f64::max);
+    // Bars scale against the max of the full pool (active + snoozed) and
+    // colors tier against its distribution, so both read the same across
+    // views and don't jump when a row is snoozed.
+    let pool = app.score_pool();
+    let max_score = pool.iter().copied().fold(0.0_f64, f64::max);
+    let tiers = ScoreTiers::from_scores(&pool);
 
     // Store PR count and selected position for scrollbar (before borrowing table_state)
     let pr_count = prs.len();
@@ -178,10 +179,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 .map(|(idx, (pr, score_result))| {
                     let index = format!("{}.", idx + 1);
                     let score_str = format_score(score_result.score, score_result.incomplete);
-                    let bar_line = score_bar(score_result.score, max_score, 8, &app.theme_colors);
+                    let bar_line =
+                        score_bar(score_result.score, max_score, 8, &app.theme_colors, &tiers);
 
                     // Build score cell with colored text and bar
-                    let score_color = app.theme_colors.score_color(score_result.score, max_score);
+                    let score_color = app.theme_colors.tier_color(score_result.score, &tiers);
                     let mut score_spans = vec![Span::styled(
                         format!("{:>5} ", score_str),
                         Style::default().fg(score_color),
@@ -240,10 +242,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 .map(|(idx, (pr, score_result))| {
                     let index = format!("{}.", idx + 1);
                     let score_str = format_score(score_result.score, score_result.incomplete);
-                    let bar_line = score_bar(score_result.score, max_score, 8, &app.theme_colors);
+                    let bar_line =
+                        score_bar(score_result.score, max_score, 8, &app.theme_colors, &tiers);
 
                     // Build score cell with colored text and bar
-                    let score_color = app.theme_colors.score_color(score_result.score, max_score);
+                    let score_color = app.theme_colors.tier_color(score_result.score, &tiers);
                     let mut score_spans = vec![Span::styled(
                         format!("{:>5} ", score_str),
                         Style::default().fg(score_color),
@@ -438,17 +441,14 @@ fn score_bar(
     max_score: f64,
     width: usize,
     theme_colors: &ThemeColors,
+    tiers: &ScoreTiers,
 ) -> Line<'static> {
-    let ratio = if max_score > 0.0 {
-        (score / max_score).min(1.0)
-    } else {
-        0.0
-    };
+    let ratio = score_intensity(score, max_score);
     let filled = (ratio * width as f64).round() as usize;
     let empty = width.saturating_sub(filled);
 
     // Get color based on score
-    let bar_color = theme_colors.score_color(score, max_score);
+    let bar_color = theme_colors.tier_color(score, tiers);
 
     let mut spans = Vec::new();
     if filled > 0 {
@@ -790,12 +790,8 @@ fn render_score_breakdown_popup(frame: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     // Line N-1: Final score with color
-    let max_score = app
-        .current_prs()
-        .iter()
-        .map(|(_, sr)| sr.score)
-        .fold(0.0_f64, f64::max);
-    let score_color = app.theme_colors.score_color(score_result.score, max_score);
+    let tiers = ScoreTiers::from_scores(&app.score_pool());
+    let score_color = app.theme_colors.tier_color(score_result.score, &tiers);
 
     lines.push(Line::from(vec![
         Span::raw("Final score: "),
@@ -837,5 +833,27 @@ mod tests {
     fn no_wake_tag_for_quiet_states() {
         assert_eq!(wake_tag(&ReviewState::NotReviewed), None);
         assert_eq!(wake_tag(&ReviewState::AwaitingAuthor), None);
+    }
+
+    // LOCKED: regression for score gradient collapse under outliers (feat/log-score-gradient).
+    // Bar fill follows log intensity, not linear share of the max.
+    #[test]
+    fn score_bar_fills_by_log_intensity() {
+        let colors = ThemeColors::dark();
+        let max = 191_200.0;
+        let tiers = ScoreTiers::from_scores(&[max, 62_600.0, 191.2]);
+        let fill = |score: f64| -> usize {
+            score_bar(score, max, 8, &colors, &tiers)
+                .spans
+                .iter()
+                .flat_map(|span| span.content.chars())
+                .filter(|c| *c == '█')
+                .count()
+        };
+        assert_eq!(fill(max), 8);
+        // ~3x below the max: near-tied, 7 of 8 (linear math showed 3 of 8).
+        assert_eq!(fill(62_600.0), 7);
+        // Three decades below the max: empty.
+        assert_eq!(fill(191.2), 0);
     }
 }
