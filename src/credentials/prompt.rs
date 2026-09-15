@@ -28,7 +28,7 @@ pub fn reprompt_for_token() -> Result<String> {
 
     let token = prompt_for_token()?;
 
-    eprintln!("New token provided. Set PR_BRO_GH_TOKEN in your shell profile to persist it.");
+    eprintln!("New token provided. Set PR_PAL_GH_TOKEN in your shell profile to persist it.");
 
     Ok(token)
 }
@@ -45,8 +45,8 @@ pub fn setup_token_if_missing() -> Result<String> {
     let token = prompt_for_token()?;
 
     eprintln!(
-        "Token accepted for this session. To persist, set PR_BRO_GH_TOKEN in your shell profile:\n  \
-         export PR_BRO_GH_TOKEN=\"your_token_here\""
+        "Token accepted for this session. To persist, set PR_PAL_GH_TOKEN in your shell profile:\n  \
+         export PR_PAL_GH_TOKEN=\"your_token_here\""
     );
 
     Ok(token)

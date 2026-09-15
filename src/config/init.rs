@@ -77,7 +77,7 @@ fn validate_approvals_str(s: &str) -> Result<(), String> {
 /// Otherwise, prompts the user with the default config path.
 pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
     println!();
-    typewriter("PR Bro Configuration Wizard");
+    typewriter("PR Pal Configuration Wizard");
     println!("===========================");
     println!();
 
@@ -368,7 +368,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
     println!();
     println!("Config written to {}", config_path.display());
     typewriter("Each scoring parameter you configured can also be overridden per query, for more granular results. See the docs for details and the rest of the options.");
-    println!("Run `pr-bro` to get started.");
+    println!("Run `pr-pal` to get started.");
 
     Ok(())
 }

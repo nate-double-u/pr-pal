@@ -11,13 +11,13 @@ pub struct CacheConfig {
     pub enabled: bool, // false when --no-cache
 }
 
-/// Get the platform-appropriate cache directory for pr-bro
+/// Get the platform-appropriate cache directory for pr-pal
 pub fn get_cache_path() -> PathBuf {
     dirs::cache_dir()
-        .map(|p| p.join("pr-bro/http-cache"))
+        .map(|p| p.join("pr-pal/http-cache"))
         .unwrap_or_else(|| {
             PathBuf::from(format!(
-                "{}/.cache/pr-bro/http-cache",
+                "{}/.cache/pr-pal/http-cache",
                 std::env::var("HOME").unwrap_or_default()
             ))
         })
@@ -260,7 +260,15 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("pr-bro-test-cache-{}-{}", test_name, timestamp))
+        std::env::temp_dir().join(format!("pr-pal-test-cache-{}-{}", test_name, timestamp))
+    }
+
+    // LOCKED: merge guard for the pr-pal cache namespace (PR #6). The fork
+    // caches under pr-pal/http-cache, not upstream's pr-bro; an upstream
+    // merge must not silently restore the old namespace.
+    #[test]
+    fn cache_path_is_pr_pal() {
+        assert!(get_cache_path().ends_with("pr-pal/http-cache"));
     }
 
     #[test]

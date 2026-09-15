@@ -2767,7 +2767,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pr-bro"
+name = "pr-pal"
 version = "0.5.1"
 dependencies = [
  "anyhow",
@@ -2787,7 +2787,6 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rustls",
- "semver",
  "serde",
  "serde-saphyr",
  "serde_json",

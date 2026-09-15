@@ -1,13 +1,13 @@
 # Caching
 
-PR Bro uses ETag-based HTTP caching to reduce GitHub API rate limit consumption. For quick-start, see the [README](../README.md).
+PR Pal uses ETag-based HTTP caching to reduce GitHub API rate limit consumption. For quick-start, see the [README](../README.md).
 
 ## Cache Location
 
 Platform-specific cache directory:
-- **macOS**: `~/Library/Caches/pr-bro`
-- **Linux**: `~/.cache/pr-bro`
-- **Windows**: `%LOCALAPPDATA%\pr-bro\cache`
+- **macOS**: `~/Library/Caches/pr-pal/http-cache`
+- **Linux**: `~/.cache/pr-pal/http-cache`
+- **Windows**: `%LOCALAPPDATA%\pr-pal\http-cache`
 
 ## Cache Behavior
 
@@ -20,10 +20,10 @@ Platform-specific cache directory:
 
 ```bash
 # Disable caching for one run
-pr-bro --no-cache
+cargo run --release -- --no-cache
 
 # Clear all cached responses
-pr-bro --clear-cache
+cargo run --release -- --clear-cache
 ```
 
 Clearing cache removes all stored API responses but preserves configuration and snooze state.

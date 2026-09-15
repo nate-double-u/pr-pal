@@ -4,7 +4,7 @@ use atomic_write_file::AtomicWriteFile;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// Get the default snooze state file path (~/.config/pr-bro/snooze.json)
+/// Get the default snooze state file path (~/.config/pr-pal/snooze.json)
 pub fn get_snooze_path() -> PathBuf {
     crate::config::get_config_dir().join("snooze.json")
 }
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn test_load_missing_file_returns_empty() {
-        let temp_path = env::temp_dir().join("pr_bro_test_missing.json");
+        let temp_path = env::temp_dir().join("pr_pal_test_missing.json");
         // Ensure it doesn't exist
         let _ = std::fs::remove_file(&temp_path);
 
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load_roundtrip() {
-        let temp_path = env::temp_dir().join("pr_bro_test_roundtrip.json");
+        let temp_path = env::temp_dir().join("pr_pal_test_roundtrip.json");
         // Ensure clean state
         let _ = std::fs::remove_file(&temp_path);
 

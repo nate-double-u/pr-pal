@@ -1,7 +1,6 @@
 use crate::review_state::ReviewState;
 use crate::tui::app::{App, InputMode, View};
 use crate::tui::theme::{score_intensity, ScoreTiers, ThemeColors};
-use crate::version_check::VersionStatus;
 use chrono::{Datelike, Local};
 use ratatui::layout::Margin;
 use ratatui::prelude::*;
@@ -31,37 +30,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Layout: conditionally include banner row
-    if app.has_update_banner() {
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // Title bar
-            Constraint::Length(1), // Update banner
-            Constraint::Length(1), // Tab bar
-            Constraint::Fill(1),   // PR table
-            Constraint::Length(1), // Status bar
-        ])
-        .split(area);
+    // Layout: Title(1) + Tabs(1) + Table(fill) + Status(1)
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // Title bar
+        Constraint::Length(1), // Tab bar
+        Constraint::Fill(1),   // PR table
+        Constraint::Length(1), // Status bar
+    ])
+    .split(area);
 
-        render_title(frame, chunks[0], app);
-        render_update_banner(frame, chunks[1], app);
-        render_tabs(frame, chunks[2], app);
-        render_table(frame, chunks[3], app);
-        render_status_bar(frame, chunks[4], app);
-    } else {
-        // Layout: Title(1) + Tabs(1) + Table(fill) + Status(1)
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // Title bar
-            Constraint::Length(1), // Tab bar
-            Constraint::Fill(1),   // PR table
-            Constraint::Length(1), // Status bar
-        ])
-        .split(area);
-
-        render_title(frame, chunks[0], app);
-        render_tabs(frame, chunks[1], app);
-        render_table(frame, chunks[2], app);
-        render_status_bar(frame, chunks[3], app);
-    }
+    render_title(frame, chunks[0], app);
+    render_tabs(frame, chunks[1], app);
+    render_table(frame, chunks[2], app);
+    render_status_bar(frame, chunks[3], app);
 
     // Render overlays based on input mode
     match app.input_mode {
@@ -80,14 +61,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn render_title(frame: &mut Frame, area: Rect, app: &App) {
     // Build title with rate limit on the right
     let mut spans = vec![Span::styled(
-        "PR Bro",
+        "PR Pal",
         Style::default().fg(app.theme_colors.title_color).bold(),
     )];
 
     // Add rate limit info on the right if available
     if let Some(remaining) = app.rate_limit_remaining {
         let rate_limit_text = format!("API: {} remaining", remaining);
-        let left_len = "PR Bro".len();
+        let left_len = "PR Pal".len();
         let right_len = rate_limit_text.len();
         let padding_len = (area.width as usize).saturating_sub(left_len + right_len);
 
@@ -101,28 +82,6 @@ fn render_title(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = Line::from(spans);
     frame.render_widget(Paragraph::new(title), area);
-}
-
-fn render_update_banner(frame: &mut Frame, area: Rect, app: &App) {
-    if let VersionStatus::UpdateAvailable { current, latest } = &app.version_status {
-        // Build banner text with styling
-        let banner_text = Line::from(vec![
-            Span::styled(
-                format!("  Update available: v{} -> v{}  ", current, latest),
-                Style::default().fg(app.theme_colors.banner_fg),
-            ),
-            Span::raw("["),
-            Span::styled("x", Style::default().fg(app.theme_colors.banner_key).bold()),
-            Span::styled(
-                " to dismiss]",
-                Style::default().fg(app.theme_colors.banner_fg),
-            ),
-        ]);
-
-        let banner =
-            Paragraph::new(banner_text).style(Style::default().bg(app.theme_colors.banner_bg));
-        frame.render_widget(banner, area);
-    }
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {

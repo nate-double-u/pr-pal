@@ -1,10 +1,10 @@
 [package]
-name = "pr-bro"
+name = "pr-pal"
 version = "0.5.1"
 edition = "2021"
 description = "Know which PR to review next. Ranks pull requests by weighted scoring."
 license = "MIT"
-repository = "https://github.com/toniperic/pr-bro"
+repository = "https://github.com/nate-double-u/pr-pal"
 keywords = ["github", "pull-request", "code-review", "tui", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -33,7 +33,6 @@ futures = "0.3"
 cacache = "13"
 http = "1"
 glob = "0.3"
-semver = "1"
 terminal-light = "1.8"
 
 [dev-dependencies]

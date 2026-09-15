@@ -6,7 +6,6 @@ use crate::scoring::ScoreResult;
 use crate::snooze::SnoozeState;
 use crate::snooze::SuppressPolicy;
 use crate::tui::theme::{Theme, ThemeColors};
-use crate::version_check::VersionStatus;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -124,8 +123,6 @@ pub struct App {
     pub spinner_frame: usize,
     pub rate_limit_remaining: Option<u64>,
     pub auth_username: Option<String>,
-    pub version_status: VersionStatus,
-    pub no_version_check: bool,
     pub theme: Theme,
     pub theme_colors: ThemeColors,
     pub last_interaction: Instant,
@@ -147,7 +144,6 @@ impl App {
         cache_handle: Option<Arc<DiskCache>>,
         verbose: bool,
         auth_username: Option<String>,
-        no_version_check: bool,
         theme: Theme,
     ) -> Self {
         let mut table_state = ratatui::widgets::TableState::default();
@@ -180,8 +176,6 @@ impl App {
             spinner_frame: 0,
             rate_limit_remaining: None,
             auth_username,
-            version_status: VersionStatus::Unknown,
-            no_version_check,
             theme,
             theme_colors: ThemeColors::new(theme),
             last_interaction: Instant::now(),
@@ -200,7 +194,6 @@ impl App {
         cache_handle: Option<Arc<DiskCache>>,
         verbose: bool,
         auth_username: Option<String>,
-        no_version_check: bool,
         theme: Theme,
     ) -> Self {
         Self {
@@ -228,8 +221,6 @@ impl App {
             spinner_frame: 0,
             rate_limit_remaining: None,
             auth_username,
-            version_status: VersionStatus::Unknown,
-            no_version_check,
             theme,
             theme_colors: ThemeColors::new(theme),
             last_interaction: Instant::now(),
@@ -841,25 +832,6 @@ impl App {
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
-
-    /// Set the version check status
-    pub fn set_version_status(&mut self, status: VersionStatus) {
-        self.version_status = status;
-    }
-
-    /// Dismiss the update banner and persist the dismissal
-    pub fn dismiss_update_banner(&mut self) {
-        if let VersionStatus::UpdateAvailable { latest, .. } = &self.version_status {
-            crate::version_check::dismiss_version(latest);
-            self.version_status = VersionStatus::UpToDate;
-            self.show_flash("Update notice dismissed".to_string());
-        }
-    }
-
-    /// Check if the update banner should be shown
-    pub fn has_update_banner(&self) -> bool {
-        matches!(self.version_status, VersionStatus::UpdateAvailable { .. })
-    }
 }
 
 // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
@@ -910,7 +882,7 @@ mod tests {
             Vec::new(),
             SnoozeState::new(),
             std::env::temp_dir().join(format!(
-                "pr-bro-app-test-{}-{}.json",
+                "pr-pal-app-test-{}-{}.json",
                 std::process::id(),
                 name
             )),
@@ -925,7 +897,6 @@ mod tests {
             None,
             false,
             Some("me".to_string()),
-            true,
             Theme::Dark,
         )
     }
