@@ -147,15 +147,19 @@ async fn fetch_pr_reviews(
     number: u64,
     auth_username: Option<&str>,
 ) -> Result<(u32, bool, Option<chrono::DateTime<chrono::Utc>>)> {
-    let reviews = client
+    let first_page = client
         .pulls(owner, repo)
         .list_reviews(number)
+        .per_page(100)
         .send()
         .await
         .context("Failed to fetch PR reviews")?;
+    let reviews = client
+        .all_pages(first_page)
+        .await
+        .context("Failed to fetch PR review pages")?;
 
     let approved_count = reviews
-        .items
         .iter()
         .filter(|review| {
             matches!(
@@ -168,7 +172,6 @@ async fn fetch_pr_reviews(
     // The user's reviews: any state counts, latest submitted_at is the anchor
     let my_last_review_at = auth_username.and_then(|username| {
         reviews
-            .items
             .iter()
             .filter(|r| {
                 r.user
@@ -179,7 +182,7 @@ async fn fetch_pr_reviews(
             .max()
     });
     let user_has_reviewed = auth_username.is_some_and(|username| {
-        reviews.items.iter().any(|r| {
+        reviews.iter().any(|r| {
             r.user
                 .as_ref()
                 .is_some_and(|u| u.login.eq_ignore_ascii_case(username))
@@ -956,6 +959,89 @@ mod tests {
         assert_eq!(
             pr.signals.review_requested_at,
             Some(ts("2026-09-07T00:00:00Z"))
+        );
+    }
+
+    // LOCKED: regression for review-fetch pagination (pr-pal#2 Copilot review).
+    // fetch_pr_reviews must follow the Link header; reviews beyond the first
+    // page still count toward approvals and the my-review anchor.
+    #[tokio::test]
+    async fn enrichment_counts_reviews_from_all_pages() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(search_body(vec![pr_issue_json(5, "o", "r")])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pull_details_json(5)))
+            .mount(&server)
+            .await;
+
+        // Page 2: my review and a second approval live beyond page 1.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/5/reviews"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": 903,
+                    "node_id": "R_903",
+                    "html_url": "https://github.com/o/r/pull/5#pullrequestreview-903",
+                    "user": author_json("me"),
+                    "state": "APPROVED",
+                    "submitted_at": "2026-09-05T00:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        // Page 1: someone else's approval plus a Link header to page 2.
+        let next_link = format!(
+            "<{}/repos/o/r/pulls/5/reviews?per_page=100&page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/5/reviews"))
+            .and(query_param_is_missing("page"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next_link.as_str())
+                    .set_body_json(json!([
+                        {
+                            "id": 902,
+                            "node_id": "R_902",
+                            "html_url": "https://github.com/o/r/pull/5#pullrequestreview-902",
+                            "user": author_json("someone-else"),
+                            "state": "APPROVED",
+                            "submitted_at": "2026-09-03T00:00:00Z"
+                        }
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let prs = search_and_enrich_prs(&client, "review-requested:@me", Some("me"), None, false)
+            .await
+            .expect("search_and_enrich_prs should succeed");
+
+        assert_eq!(prs.len(), 1);
+        let pr = &prs[0];
+        assert_eq!(pr.approvals, 2, "approvals must include page 2");
+        assert!(pr.user_has_reviewed, "my review is on page 2");
+        assert_eq!(
+            pr.signals.my_last_review_at,
+            Some(ts("2026-09-05T00:00:00Z"))
         );
     }
 
