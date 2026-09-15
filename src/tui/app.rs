@@ -129,6 +129,10 @@ pub struct App {
     pub theme: Theme,
     pub theme_colors: ThemeColors,
     pub last_interaction: Instant,
+    /// Data rows visible in the table viewport, set on each render. Page
+    /// and viewport jumps fall back to single-row moves before the first
+    /// render, when this is still zero.
+    pub visible_rows: usize,
 }
 
 impl App {
@@ -181,6 +185,7 @@ impl App {
             theme,
             theme_colors: ThemeColors::new(theme),
             last_interaction: Instant::now(),
+            visible_rows: 0,
         }
     }
 
@@ -228,6 +233,7 @@ impl App {
             theme,
             theme_colors: ThemeColors::new(theme),
             last_interaction: Instant::now(),
+            visible_rows: 0,
         }
     }
 
@@ -283,6 +289,81 @@ impl App {
             None => 0,
         };
         self.table_state.select(Some(i));
+    }
+
+    /// PageDown: advance by one viewport of rows, clamped at the last row.
+    pub fn page_down(&mut self) {
+        let len = self.current_prs().len();
+        if len == 0 {
+            return;
+        }
+        let page = self.visible_rows.max(1);
+        let i = self
+            .table_state
+            .selected()
+            .map_or(0, |i| (i + page).min(len - 1));
+        self.table_state.select(Some(i));
+    }
+
+    /// PageUp: move back by one viewport of rows, clamped at the first row.
+    pub fn page_up(&mut self) {
+        if self.current_prs().is_empty() {
+            return;
+        }
+        let page = self.visible_rows.max(1);
+        let i = self
+            .table_state
+            .selected()
+            .map_or(0, |i| i.saturating_sub(page));
+        self.table_state.select(Some(i));
+    }
+
+    /// g: jump to the first row.
+    pub fn jump_top(&mut self) {
+        if !self.current_prs().is_empty() {
+            self.table_state.select(Some(0));
+        }
+    }
+
+    /// G: jump to the last row.
+    pub fn jump_bottom(&mut self) {
+        let len = self.current_prs().len();
+        if len > 0 {
+            self.table_state.select(Some(len - 1));
+        }
+    }
+
+    /// Rows actually on screen: viewport size capped by rows left after the
+    /// scroll offset. Zero only when the list is empty.
+    fn viewport(&self) -> Option<(usize, usize)> {
+        let len = self.current_prs().len();
+        if len == 0 {
+            return None;
+        }
+        let offset = self.table_state.offset().min(len - 1);
+        let visible = self.visible_rows.max(1).min(len - offset);
+        Some((offset, visible))
+    }
+
+    /// H (vim): jump to the top row of the viewport.
+    pub fn jump_high(&mut self) {
+        if let Some((offset, _)) = self.viewport() {
+            self.table_state.select(Some(offset));
+        }
+    }
+
+    /// M (vim): jump to the middle row of the viewport.
+    pub fn jump_middle(&mut self) {
+        if let Some((offset, visible)) = self.viewport() {
+            self.table_state.select(Some(offset + visible / 2));
+        }
+    }
+
+    /// L (vim): jump to the bottom row of the viewport.
+    pub fn jump_low(&mut self) {
+        if let Some((offset, visible)) = self.viewport() {
+            self.table_state.select(Some(offset + visible - 1));
+        }
     }
 
     pub fn selected_pr(&self) -> Option<&PullRequest> {
@@ -858,6 +939,86 @@ mod tests {
         app.current_view = View::Snoozed;
         app.table_state.select(Some(0));
         app
+    }
+
+    /// Seed an app with `n` active rows, first row selected.
+    fn app_with_rows(name: &str, n: usize) -> App {
+        let mut app = test_app(name);
+        app.active_prs = (0..n)
+            .map(|i| scored(&format!("https://x/{i}"), 100.0 - i as f64))
+            .collect();
+        app.table_state.select(Some(0));
+        app
+    }
+
+    #[test]
+    fn page_keys_move_by_viewport_and_clamp() {
+        let mut app = app_with_rows("page-keys", 30);
+        app.visible_rows = 10;
+        app.page_down();
+        assert_eq!(app.table_state.selected(), Some(10));
+        app.page_down();
+        app.page_down();
+        // Clamped at the last row, no wraparound.
+        assert_eq!(app.table_state.selected(), Some(29));
+        app.page_up();
+        assert_eq!(app.table_state.selected(), Some(19));
+        app.page_up();
+        app.page_up();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn page_keys_fall_back_to_single_row_before_first_render() {
+        let mut app = app_with_rows("page-fallback", 5);
+        app.visible_rows = 0;
+        app.page_down();
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn vim_jumps_target_top_middle_bottom_of_viewport() {
+        let mut app = app_with_rows("vim-jumps", 30);
+        app.visible_rows = 10;
+        *app.table_state.offset_mut() = 5; // rows 5..15 visible
+        app.jump_high();
+        assert_eq!(app.table_state.selected(), Some(5));
+        app.jump_middle();
+        assert_eq!(app.table_state.selected(), Some(10));
+        app.jump_low();
+        assert_eq!(app.table_state.selected(), Some(14));
+    }
+
+    #[test]
+    fn vim_jumps_clamp_when_viewport_outruns_list() {
+        let mut app = app_with_rows("vim-clamp", 8);
+        app.visible_rows = 10;
+        app.jump_low();
+        assert_eq!(app.table_state.selected(), Some(7));
+        app.jump_middle();
+        assert_eq!(app.table_state.selected(), Some(4));
+    }
+
+    #[test]
+    fn top_and_bottom_jumps() {
+        let mut app = app_with_rows("top-bottom", 12);
+        app.jump_bottom();
+        assert_eq!(app.table_state.selected(), Some(11));
+        app.jump_top();
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn nav_keys_are_safe_on_empty_lists() {
+        let mut app = test_app("nav-empty");
+        app.page_down();
+        app.page_up();
+        app.jump_top();
+        app.jump_bottom();
+        app.jump_high();
+        app.jump_middle();
+        app.jump_low();
+        assert_eq!(app.table_state.selected(), None);
     }
 
     #[test]

@@ -311,8 +311,12 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
 
+    // Data rows on screen: area minus header row and its bottom margin.
+    // Page and viewport jump keys move by this amount.
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    app.visible_rows = visible_rows;
+
     // Render scrollbar if PR list exceeds visible area
-    let visible_rows = area.height.saturating_sub(2) as usize; // Subtract header and margin
     if pr_count > visible_rows {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(Style::default().fg(app.theme_colors.scrollbar_thumb))
@@ -588,7 +592,7 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
 
 /// Render the help overlay popup
 fn render_help_popup(frame: &mut Frame, app: &App) {
-    let popup_area = centered_rect_fixed(50, 17, frame.area());
+    let popup_area = centered_rect_fixed(50, 20, frame.area());
 
     // Clear the background
     frame.render_widget(Clear, popup_area);
@@ -608,6 +612,9 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
     let help_entries: Vec<(&str, &str)> = vec![
         ("j / Down", "Move down"),
         ("k / Up", "Move up"),
+        ("PgDn / PgUp", "Page down / up"),
+        ("g / G", "First / last row"),
+        ("H / M / L", "Top / middle / bottom of view"),
         ("Enter / o", "Open PR in browser"),
         ("b", "Score breakdown"),
         ("s", "Snooze / re-snooze PR"),

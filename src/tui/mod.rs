@@ -252,6 +252,13 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
                 // Navigation
                 KeyCode::Char('j') | KeyCode::Down => app.next_row(),
                 KeyCode::Char('k') | KeyCode::Up => app.previous_row(),
+                KeyCode::PageDown => app.page_down(),
+                KeyCode::PageUp => app.page_up(),
+                KeyCode::Char('g') => app.jump_top(),
+                KeyCode::Char('G') => app.jump_bottom(),
+                KeyCode::Char('H') => app.jump_high(),
+                KeyCode::Char('M') => app.jump_middle(),
+                KeyCode::Char('L') => app.jump_low(),
 
                 // Open PR in browser
                 KeyCode::Enter | KeyCode::Char('o') => {
@@ -324,6 +331,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
             KeyCode::Esc | KeyCode::Char('b') => app.dismiss_score_breakdown(),
             KeyCode::Char('j') | KeyCode::Down => app.next_row(),
             KeyCode::Char('k') | KeyCode::Up => app.previous_row(),
+            KeyCode::PageDown => app.page_down(),
+            KeyCode::PageUp => app.page_up(),
+            KeyCode::Char('g') => app.jump_top(),
+            KeyCode::Char('G') => app.jump_bottom(),
             _ => {}
         },
         app::InputMode::Help => {
