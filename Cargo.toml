@@ -4,7 +4,7 @@ version = "0.5.1"
 edition = "2021"
 description = "Know which PR to review next. Ranks pull requests by weighted scoring."
 license = "MIT"
-repository = "https://github.com/toniperic/pr-bro"
+repository = "https://github.com/nate-double-u/pr-pal"
 keywords = ["github", "pull-request", "code-review", "tui", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 

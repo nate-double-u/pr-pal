@@ -1,10 +1,12 @@
-# PR Bro
+# PR Pal
 
-[![CI](https://github.com/toniperic/pr-bro/actions/workflows/ci.yml/badge.svg)](https://github.com/toniperic/pr-bro/actions/workflows/ci.yml) [![Crates.io](https://img.shields.io/crates/v/pr-bro.svg)](https://crates.io/crates/pr-bro) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+PR Pal is a fork of [PR Bro](https://github.com/toniperic/pr-bro) by [@toniperic](https://github.com/toniperic). The binary, crate, and config paths keep the `pr-bro` name for upstream compatibility.
+
+[![CI](https://github.com/nate-double-u/pr-pal/actions/workflows/ci.yml/badge.svg)](https://github.com/nate-double-u/pr-pal/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [![Demo](https://asciinema.org/a/780716.svg)](https://asciinema.org/a/780716)
 
-Know which PR to review next. PR Bro ranks pull requests by weighted scoring across your GitHub queries, so you always start with the most important review.
+Know which PR to review next. PR Pal ranks pull requests by weighted scoring across your GitHub queries, so you always start with the most important review.
 
 ## Requirements
 
@@ -17,47 +19,27 @@ Know which PR to review next. PR Bro ranks pull requests by weighted scoring acr
 
 ## Installation
 
-### Homebrew (macOS)
+Run from source with the Rust toolchain (install from [rustup.rs](https://rustup.rs)):
 
 ```bash
-brew tap toniperic/tap
-brew install pr-bro
+git clone https://github.com/nate-double-u/pr-pal.git
+cd pr-pal
+cargo run --release
 ```
 
-To upgrade:
-
-```bash
-brew upgrade pr-bro
-```
-
-### Cargo
-
-```bash
-cargo install pr-bro
-```
-
-Requires Rust toolchain. Install from [rustup.rs](https://rustup.rs).
-
-### Binary Download
-
-Download pre-built binaries from the [GitHub Releases](https://github.com/toniperic/pr-bro/releases) page. Extract and move to your PATH:
-
-```bash
-tar -xzf pr-bro-<version>-<platform>.tar.gz
-mv pr-bro /usr/local/bin/
-```
+Installing upstream `pr-bro` via Homebrew, Cargo, or binary download gets you the original, without this fork's changes; see the [upstream README](https://github.com/toniperic/pr-bro#installation).
 
 ## Quick Usage
 
 ```bash
-pr-bro
+cargo run --release
 ```
 
-On first run, PR Bro will prompt you with a series of questions to set up your configuration. It will also ask for your GitHub token interactively. To skip the token prompt, set the `PR_BRO_GH_TOKEN` environment variable.
+On first run, PR Pal will prompt you with a series of questions to set up your configuration. It will also ask for your GitHub token interactively. To skip the token prompt, set the `PR_BRO_GH_TOKEN` environment variable.
 
 For the full list of configuration options, see the [Configuration Reference](docs/configuration.md).
 
-Use `pr-bro --help` for all command-line options. Press `?` in the TUI for keyboard shortcuts.
+Use `cargo run -- --help` for all command-line options. Press `?` in the TUI for keyboard shortcuts.
 
 ## Features
 
@@ -73,7 +55,7 @@ Use `pr-bro --help` for all command-line options. Press `?` in the TUI for keybo
 
 **Score breakdown** shows exactly how a PR's score was calculated. See which factors contributed most. Press `b` on any PR to open the detail view.
 
-**Light and dark themes** adapt to your terminal. PR Bro auto-detects your terminal background and picks the right color palette.
+**Light and dark themes** adapt to your terminal. PR Pal auto-detects your terminal background and picks the right color palette.
 
 **ETag-based HTTP caching** reduces GitHub API calls. Auto-refresh only fetches if data changed on the server. Manual refresh bypasses in-memory cache.
 

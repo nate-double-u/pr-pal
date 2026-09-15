@@ -47,28 +47,29 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
     app.is_loading = true;
 
     // Spawn background version check (after TUI renders, non-blocking)
-    let mut pending_version_check: Option<tokio::task::JoinHandle<_>> = if !app.no_version_check {
-        // First, check if we have a fresh cached result (synchronous, instant)
-        let current_version = env!("CARGO_PKG_VERSION").to_string();
-        let cached_status = crate::version_check::load_cached_status(&current_version);
-        match &cached_status {
-            crate::version_check::VersionStatus::UpdateAvailable { .. } => {
-                app.set_version_status(cached_status);
-                None // No need to fetch, cache is fresh
-            }
-            _ => {
-                // Spawn background check
-                let token = std::env::var("PR_BRO_GH_TOKEN").ok();
-                token.map(|t| {
-                    tokio::spawn(async move {
-                        crate::version_check::check_version(&t, &current_version).await
+    let mut pending_version_check: Option<tokio::task::JoinHandle<_>> =
+        if crate::version_check::ENABLED && !app.no_version_check {
+            // First, check if we have a fresh cached result (synchronous, instant)
+            let current_version = env!("CARGO_PKG_VERSION").to_string();
+            let cached_status = crate::version_check::load_cached_status(&current_version);
+            match &cached_status {
+                crate::version_check::VersionStatus::UpdateAvailable { .. } => {
+                    app.set_version_status(cached_status);
+                    None // No need to fetch, cache is fresh
+                }
+                _ => {
+                    // Spawn background check
+                    let token = std::env::var("PR_BRO_GH_TOKEN").ok();
+                    token.map(|t| {
+                        tokio::spawn(async move {
+                            crate::version_check::check_version(&t, &current_version).await
+                        })
                     })
-                })
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Main loop
     loop {

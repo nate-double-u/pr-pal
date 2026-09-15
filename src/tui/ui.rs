@@ -80,14 +80,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn render_title(frame: &mut Frame, area: Rect, app: &App) {
     // Build title with rate limit on the right
     let mut spans = vec![Span::styled(
-        "PR Bro",
+        "PR Pal",
         Style::default().fg(app.theme_colors.title_color).bold(),
     )];
 
     // Add rate limit info on the right if available
     if let Some(remaining) = app.rate_limit_remaining {
         let rate_limit_text = format!("API: {} remaining", remaining);
-        let left_len = "PR Bro".len();
+        let left_len = "PR Pal".len();
         let right_len = rate_limit_text.len();
         let padding_len = (area.width as usize).saturating_sub(left_len + right_len);
 

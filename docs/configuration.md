@@ -1,6 +1,6 @@
 # Configuration Reference
 
-This document covers the full configuration options for PR Bro. For a quick-start guide, see the [README](../README.md).
+This document covers the full configuration options for PR Pal. For a quick-start guide, see the [README](../README.md).
 
 Configuration file location: `~/.config/pr-bro/config.yaml`
 
@@ -120,8 +120,8 @@ size:
 
 **Exclude pattern behavior:**
 - Patterns match against the **filename only** (basename), not the full file path. For example, `*.lock` will match `Cargo.lock` and `subdir/package-lock.json`.
-- When exclude patterns are configured, PR Bro fetches per-file diff data from the GitHub API to determine which files to exclude. This adds 1-2 API calls per PR (paginated at 100 files per page).
-- If the per-file data fetch fails (e.g., rate limit), PR Bro falls back to the aggregate size from the PR summary (no exclusions applied).
+- When exclude patterns are configured, PR Pal fetches per-file diff data from the GitHub API to determine which files to exclude. This adds 1-2 API calls per PR (paginated at 100 files per page).
+- If the per-file data fetch fails (e.g., rate limit), PR Pal falls back to the aggregate size from the PR summary (no exclusions applied).
 - Without exclude patterns, no extra API calls are made.
 - Invalid glob patterns are caught at startup during config validation.
 
@@ -244,7 +244,7 @@ In this example, the "urgent" query:
 
 ### YAML Merge Keys
 
-YAML merge keys (`<<:`) are supported by the YAML parser for reducing duplication within your config file. This is a YAML feature processed when reading the file, independent of the runtime merge that combines global and per-query scoring. Note that because PR Bro validates config structure strictly (`deny_unknown_fields`), YAML anchors must be placed inside fields that expect the anchored structure, not at the top level. For advanced YAML anchor/merge-key usage, refer to the [YAML specification](https://yaml.org/type/merge.html).
+YAML merge keys (`<<:`) are supported by the YAML parser for reducing duplication within your config file. This is a YAML feature processed when reading the file, independent of the runtime merge that combines global and per-query scoring. Note that because PR Pal validates config structure strictly (`deny_unknown_fields`), YAML anchors must be placed inside fields that expect the anchored structure, not at the top level. For advanced YAML anchor/merge-key usage, refer to the [YAML specification](https://yaml.org/type/merge.html).
 
 ## Awaiting-Author Suppression
 
@@ -275,7 +275,7 @@ Notes:
 
 ## Theme
 
-PR Bro supports light and dark color themes. The default is `auto`, which detects your terminal's background color at startup and selects the appropriate palette.
+PR Pal supports light and dark color themes. The default is `auto`, which detects your terminal's background color at startup and selects the appropriate palette.
 
 ```yaml
 theme: auto    # Detect terminal background (default)
@@ -287,7 +287,7 @@ If auto-detection fails (e.g., over SSH or in tmux), it falls back to the dark t
 
 ## Config Validation
 
-PR Bro validates your configuration at startup with clear error messages:
+PR Pal validates your configuration at startup with clear error messages:
 
 - **Unknown YAML keys** are rejected (catches typos like `approvalls` instead of `approvals`)
 - **Overlapping size bucket ranges** are rejected (prevents ambiguous scoring)

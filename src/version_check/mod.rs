@@ -3,6 +3,11 @@ pub mod checker;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Fork switch: upstream's release feed says nothing about pr-pal versions,
+/// so the startup version check is disabled. Flip alongside a fork release
+/// process (and retarget checker.rs) if pr-pal ever publishes releases.
+pub const ENABLED: bool = false;
+
 /// Status of version check result
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionStatus {
@@ -116,5 +121,18 @@ pub fn load_cached_status(current_version: &str) -> VersionStatus {
         }
     } else {
         VersionStatus::UpToDate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Tripwire: the check queries upstream's (toniperic/pr-bro) release feed,
+    // which says nothing about this fork's versions. Keep it disabled so an
+    // upstream merge cannot quietly re-enable phoning home. Flip ENABLED only
+    // alongside a real pr-pal release process.
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // tripwire: the constant is the contract
+    fn fork_version_check_stays_disabled() {
+        assert!(!super::ENABLED);
     }
 }

@@ -1,6 +1,6 @@
 # Caching
 
-PR Bro uses ETag-based HTTP caching to reduce GitHub API rate limit consumption. For quick-start, see the [README](../README.md).
+PR Pal uses ETag-based HTTP caching to reduce GitHub API rate limit consumption. For quick-start, see the [README](../README.md).
 
 ## Cache Location
 
