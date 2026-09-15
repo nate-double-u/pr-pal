@@ -65,6 +65,9 @@ pub enum UndoAction {
     Snoozed {
         url: String,
         title: String,
+        /// The row was suppressed (awaiting author) before the manual snooze;
+        /// undo restores suppression instead of activating the row.
+        was_suppressed: bool,
     },
     Unsnoozed {
         url: String,
@@ -361,6 +364,7 @@ impl App {
                 self.push_undo(UndoAction::Snoozed {
                     url: url.clone(),
                     title: title.clone(),
+                    was_suppressed: false,
                 });
 
                 // Move PR from active to snoozed
@@ -383,10 +387,11 @@ impl App {
                 } else {
                     // Suppressed (awaiting author) row: this is a fresh
                     // manual snooze, which takes precedence over suppression
-                    self.suppressed_urls.remove(&url);
+                    let was_suppressed = self.suppressed_urls.remove(&url);
                     self.push_undo(UndoAction::Snoozed {
                         url: url.clone(),
                         title: title.clone(),
+                        was_suppressed,
                     });
                     self.show_flash(format!("Snoozed: {} (z to undo)", title));
                 }
@@ -467,7 +472,11 @@ impl App {
         };
 
         match action {
-            UndoAction::Snoozed { url, title } => {
+            UndoAction::Snoozed {
+                url,
+                title,
+                was_suppressed,
+            } => {
                 // Undo a snooze: unsnooze the PR
                 self.snooze_state.unsnooze(&url);
 
@@ -479,10 +488,16 @@ impl App {
                     return;
                 }
 
-                // Move PR back from snoozed to active
-                self.move_pr_between_lists(&url, false);
-
-                self.show_flash(format!("Undid snooze: {}", title));
+                if was_suppressed {
+                    // The row was awaiting-author before the snooze; restore
+                    // that state instead of activating it (no wake occurred).
+                    self.suppressed_urls.insert(url.clone());
+                    self.show_flash(format!("Undid snooze: {} (awaiting author)", title));
+                } else {
+                    // Move PR back from snoozed to active
+                    self.move_pr_between_lists(&url, false);
+                    self.show_flash(format!("Undid snooze: {}", title));
+                }
             }
             UndoAction::Unsnoozed { url, title, until } => {
                 // Undo an unsnooze: re-snooze the PR
@@ -817,6 +832,32 @@ mod tests {
             app.undo_stack.front(),
             Some(UndoAction::Snoozed { .. })
         ));
+    }
+
+    // LOCKED: regression for undo of suppressed-row snooze (pr-pal#2 Copilot review).
+    // Undoing a manual snooze of a suppressed row must restore suppression,
+    // not activate the row: no wake event occurred.
+    #[test]
+    fn undo_snooze_of_suppressed_row_restores_suppression() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("undo-suppressed", url);
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+        assert!(!app.suppressed_urls.contains(url), "precondition");
+
+        app.undo_last();
+
+        assert!(
+            !app.snooze_state.is_snoozed(url),
+            "manual snooze must be undone"
+        );
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression must be restored"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
+        assert!(app.active_prs.is_empty());
     }
 
     #[test]
