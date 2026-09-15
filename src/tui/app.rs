@@ -1,17 +1,50 @@
 use crate::config::Config;
 use crate::github::cache::{CacheConfig, DiskCache};
 use crate::github::types::PullRequest;
+use crate::review_state::{review_state, ReviewState};
 use crate::scoring::ScoreResult;
 use crate::snooze::SnoozeState;
 use crate::tui::theme::{Theme, ThemeColors};
 use crate::version_check::VersionStatus;
 use chrono::{DateTime, Utc};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 const MAX_UNDO: usize = 50;
+
+/// Merge manually snoozed and suppressed (awaiting author) PRs into one
+/// display list, sorted by score descending (ties: older PR first). Returns
+/// the merged list and the set of suppressed URLs for tagging.
+pub fn merge_snoozed_lists(
+    snoozed: Vec<(PullRequest, ScoreResult)>,
+    suppressed: Vec<(PullRequest, ScoreResult)>,
+) -> (Vec<(PullRequest, ScoreResult)>, HashSet<String>) {
+    let suppressed_urls: HashSet<String> =
+        suppressed.iter().map(|(pr, _)| pr.url.clone()).collect();
+    let mut merged = snoozed;
+    merged.extend(suppressed);
+    merged.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.created_at.cmp(&b.0.created_at))
+    });
+    (merged, suppressed_urls)
+}
+
+/// Compute the review-cycle state for each PR (keyed by URL), used to tag
+/// Active rows with the reason a PR resurfaced.
+pub fn compute_review_states(
+    prs: &[(PullRequest, ScoreResult)],
+    valve: Option<chrono::Duration>,
+    now: DateTime<Utc>,
+) -> HashMap<String, ReviewState> {
+    prs.iter()
+        .map(|(pr, _)| (pr.url.clone(), review_state(&pr.signals, now, valve)))
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
@@ -47,7 +80,12 @@ pub enum UndoAction {
 
 pub struct App {
     pub active_prs: Vec<(PullRequest, ScoreResult)>,
+    /// Manually snoozed + suppressed (awaiting author) PRs, merged for display
     pub snoozed_prs: Vec<(PullRequest, ScoreResult)>,
+    /// URLs of PRs suppressed as awaiting-author (subset of snoozed_prs)
+    pub suppressed_urls: HashSet<String>,
+    /// Review-cycle state per PR URL, for wake-reason tags
+    pub review_states: HashMap<String, ReviewState>,
     pub table_state: ratatui::widgets::TableState,
     pub current_view: View,
     pub snooze_state: SnoozeState,
@@ -98,6 +136,8 @@ impl App {
         Self {
             active_prs,
             snoozed_prs,
+            suppressed_urls: HashSet::new(),
+            review_states: HashMap::new(),
             table_state,
             current_view: View::Active,
             snooze_state,
@@ -143,6 +183,8 @@ impl App {
         Self {
             active_prs: Vec::new(),
             snoozed_prs: Vec::new(),
+            suppressed_urls: HashSet::new(),
+            review_states: HashMap::new(),
             table_state: ratatui::widgets::TableState::default(),
             current_view: View::Active,
             snooze_state,
@@ -293,6 +335,7 @@ impl App {
         };
 
         // Capture old snooze_until before overwriting (needed for undo on re-snooze)
+        let was_manually_snoozed = self.snooze_state.snoozed_entries().contains_key(&url);
         let old_until = self
             .snooze_state
             .snoozed_entries()
@@ -325,15 +368,26 @@ impl App {
                 self.show_flash(format!("Snoozed: {} (z to undo)", title));
             }
             View::Snoozed => {
-                // Push re-snooze to undo stack with previous duration
-                self.push_undo(UndoAction::Resnooze {
-                    url: url.clone(),
-                    title: title.clone(),
-                    previous_until: old_until,
-                });
+                if was_manually_snoozed {
+                    // Push re-snooze to undo stack with previous duration
+                    self.push_undo(UndoAction::Resnooze {
+                        url: url.clone(),
+                        title: title.clone(),
+                        previous_until: old_until,
+                    });
 
-                // PR stays in snoozed list -- no move needed
-                self.show_flash(format!("Re-snoozed: {} (z to undo)", title));
+                    // PR stays in snoozed list -- no move needed
+                    self.show_flash(format!("Re-snoozed: {} (z to undo)", title));
+                } else {
+                    // Suppressed (awaiting author) row: this is a fresh
+                    // manual snooze, which takes precedence over suppression
+                    self.suppressed_urls.remove(&url);
+                    self.push_undo(UndoAction::Snoozed {
+                        url: url.clone(),
+                        title: title.clone(),
+                    });
+                    self.show_flash(format!("Snoozed: {} (z to undo)", title));
+                }
             }
         }
 
@@ -368,6 +422,15 @@ impl App {
             }
             None => return,
         };
+
+        // Suppressed rows aren't manually snoozed; there is nothing to undo.
+        // They resurface on author updates, mentions, or re-requests.
+        if self.suppressed_urls.contains(&url)
+            && !self.snooze_state.snoozed_entries().contains_key(&url)
+        {
+            self.show_flash("Awaiting author since your review; updates resurface it".to_string());
+            return;
+        }
 
         // Unsnooze
         self.snooze_state.unsnooze(&url);
@@ -541,15 +604,28 @@ impl App {
     }
 
     /// Update PRs with fresh data from fetch
-    pub fn update_prs(
-        &mut self,
-        active: Vec<(PullRequest, ScoreResult)>,
-        snoozed: Vec<(PullRequest, ScoreResult)>,
-        rate_limit_remaining: Option<u64>,
-    ) {
+    pub fn update_prs(&mut self, fetched: crate::fetch::FetchedPrs) {
+        let crate::fetch::FetchedPrs {
+            active,
+            suppressed,
+            snoozed,
+            rate_limit_remaining,
+        } = fetched;
+
+        // Suppressed PRs share the Snoozed view, tagged "awaiting author"
+        let (snoozed_merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
+
+        // Wake-reason tags for Active rows (valve from the suppress config)
+        let valve = crate::snooze::suppress_policy(self.config.suppress.as_ref())
+            .ok()
+            .flatten()
+            .and_then(|p| p.resurface_after);
+        self.review_states = compute_review_states(&active, valve, Utc::now());
+
         // Replace PR lists
         self.active_prs = active;
-        self.snoozed_prs = snoozed;
+        self.snoozed_prs = snoozed_merged;
+        self.suppressed_urls = suppressed_urls;
 
         // Update rate limit info
         self.rate_limit_remaining = rate_limit_remaining;
@@ -578,11 +654,19 @@ impl App {
 
         // Show flash message
         let active_count = self.active_prs.len();
-        let snoozed_count = self.snoozed_prs.len();
-        self.show_flash(format!(
-            "Refreshed ({} active, {} snoozed)",
-            active_count, snoozed_count
-        ));
+        let awaiting_count = self.suppressed_urls.len();
+        let snoozed_count = self.snoozed_prs.len() - awaiting_count;
+        if awaiting_count > 0 {
+            self.show_flash(format!(
+                "Refreshed ({} active, {} awaiting author, {} snoozed)",
+                active_count, awaiting_count, snoozed_count
+            ));
+        } else {
+            self.show_flash(format!(
+                "Refreshed ({} active, {} snoozed)",
+                active_count, snoozed_count
+            ));
+        }
     }
 
     /// Advance the loading spinner animation frame
@@ -607,5 +691,118 @@ impl App {
     /// Check if the update banner should be shown
     pub fn has_update_banner(&self) -> bool {
         matches!(self.version_status, VersionStatus::UpdateAvailable { .. })
+    }
+}
+
+// LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+// All tests in this module are locked. Snoozed-view merge and wake-state computation for row tags.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review_state::{ReviewSignals, ReviewState};
+    use chrono::{Duration, TimeZone};
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    fn test_pr(url: &str, signals: ReviewSignals) -> PullRequest {
+        PullRequest {
+            title: format!("PR {}", url),
+            number: 1,
+            author: "author".to_string(),
+            repo: "o/r".to_string(),
+            url: url.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            additions: 1,
+            deletions: 1,
+            approvals: 0,
+            draft: false,
+            labels: vec![],
+            user_has_reviewed: false,
+            filtered_size: None,
+            signals,
+        }
+    }
+
+    fn scored(url: &str, score: f64) -> (PullRequest, ScoreResult) {
+        (
+            test_pr(url, ReviewSignals::default()),
+            ScoreResult {
+                score,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn merge_snoozed_lists_sorts_by_score_and_tracks_suppressed() {
+        let snoozed = vec![scored("https://x/1", 50.0)];
+        let suppressed = vec![scored("https://x/2", 100.0), scored("https://x/3", 10.0)];
+
+        let (merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
+
+        let urls: Vec<&str> = merged.iter().map(|(pr, _)| pr.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://x/2", "https://x/1", "https://x/3"]);
+        assert!(suppressed_urls.contains("https://x/2"));
+        assert!(suppressed_urls.contains("https://x/3"));
+        assert!(!suppressed_urls.contains("https://x/1"));
+    }
+
+    #[test]
+    fn merge_snoozed_lists_breaks_score_ties_by_age() {
+        let mut older = scored("https://x/old", 50.0);
+        older.0.created_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let newer = scored("https://x/new", 50.0);
+
+        let (merged, _) = merge_snoozed_lists(vec![newer], vec![older]);
+
+        let urls: Vec<&str> = merged.iter().map(|(pr, _)| pr.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://x/old", "https://x/new"]);
+    }
+
+    #[test]
+    fn compute_review_states_maps_urls_to_states() {
+        let now = ts("2026-09-10T00:00:00Z");
+        let pushed = (
+            test_pr(
+                "https://x/pushed",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    last_commit_at: Some(ts("2026-09-02T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+        let not_reviewed = scored("https://x/plain", 1.0);
+
+        let states = compute_review_states(&[pushed, not_reviewed], None, now);
+
+        assert_eq!(states.get("https://x/pushed"), Some(&ReviewState::Pushed));
+        assert_eq!(
+            states.get("https://x/plain"),
+            Some(&ReviewState::NotReviewed)
+        );
+    }
+
+    #[test]
+    fn compute_review_states_applies_valve() {
+        let now = ts("2026-09-30T00:00:00Z");
+        let stalled = (
+            test_pr(
+                "https://x/stalled",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+
+        let states = compute_review_states(&[stalled], Some(Duration::days(21)), now);
+
+        assert_eq!(states.get("https://x/stalled"), Some(&ReviewState::Stalled));
     }
 }

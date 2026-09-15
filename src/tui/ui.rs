@@ -1,3 +1,4 @@
+use crate::review_state::ReviewState;
 use crate::tui::app::{App, InputMode, View};
 use crate::tui::theme::ThemeColors;
 use crate::version_check::VersionStatus;
@@ -8,6 +9,17 @@ use ratatui::widgets::{
     Block, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
     Tabs,
 };
+
+/// Tag naming the reason a reviewed PR is back in the Active list.
+fn wake_tag(state: &ReviewState) -> Option<&'static str> {
+    match state {
+        ReviewState::Pushed => Some("(updated)"),
+        ReviewState::Mentioned => Some("(mentioned)"),
+        ReviewState::ReviewRequested => Some("(re-requested)"),
+        ReviewState::Stalled => Some("(stalled)"),
+        ReviewState::NotReviewed | ReviewState::AwaitingAuthor => None,
+    }
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -179,13 +191,17 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
                     let title = pr.title.clone();
 
-                    // Get duration from snooze entry
-                    let duration = app
-                        .snooze_state
-                        .snoozed_entries()
-                        .get(&pr.url)
-                        .map(|entry| entry.format_remaining())
-                        .unwrap_or_else(|| "unknown".to_string());
+                    // Duration: manual snoozes show remaining time; suppressed
+                    // PRs are awaiting the author
+                    let duration = if app.suppressed_urls.contains(&pr.url) {
+                        "awaiting author".to_string()
+                    } else {
+                        app.snooze_state
+                            .snoozed_entries()
+                            .get(&pr.url)
+                            .map(|entry| entry.format_remaining())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    };
 
                     // Alternating row background (odd rows get subtle background)
                     let row_style = if idx % 2 == 1 {
@@ -209,7 +225,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Length(4),  // Index
                 Constraint::Length(16), // Score + bar
                 Constraint::Fill(1),    // Title
-                Constraint::Length(12), // Duration: "indefinite" = 10 chars + padding
+                Constraint::Length(16), // Duration: "awaiting author" = 15 chars + padding
                 Constraint::Length(40), // PR ref
             ];
 
@@ -237,6 +253,18 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
                     let title = pr.title.clone();
 
+                    // Tag resurfaced PRs with the wake reason
+                    let title_cell = match app.review_states.get(&pr.url).and_then(wake_tag) {
+                        Some(tag) => Cell::from(Line::from(vec![
+                            Span::styled(
+                                format!("{} ", tag),
+                                Style::default().fg(app.theme_colors.flash_success).bold(),
+                            ),
+                            Span::raw(title),
+                        ])),
+                        None => Cell::from(title),
+                    };
+
                     // Alternating row background (odd rows get subtle background)
                     let row_style = if idx % 2 == 1 {
                         Style::default().bg(app.theme_colors.row_alt_bg)
@@ -247,7 +275,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
                     Row::new(vec![
                         Cell::from(index).style(Style::default().fg(app.theme_colors.index_color)),
                         Cell::from(score_line),
-                        Cell::from(title),
+                        title_cell,
                         Cell::from(pr.short_ref()),
                     ])
                     .style(row_style)
@@ -785,4 +813,29 @@ fn render_score_breakdown_popup(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+// LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+// All tests in this module are locked. Wake-reason tags shown on resurfaced Active rows.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review_state::ReviewState;
+
+    #[test]
+    fn wake_tags_name_the_reason_a_pr_resurfaced() {
+        assert_eq!(wake_tag(&ReviewState::Pushed), Some("(updated)"));
+        assert_eq!(wake_tag(&ReviewState::Mentioned), Some("(mentioned)"));
+        assert_eq!(
+            wake_tag(&ReviewState::ReviewRequested),
+            Some("(re-requested)")
+        );
+        assert_eq!(wake_tag(&ReviewState::Stalled), Some("(stalled)"));
+    }
+
+    #[test]
+    fn no_wake_tag_for_quiet_states() {
+        assert_eq!(wake_tag(&ReviewState::NotReviewed), None);
+        assert_eq!(wake_tag(&ReviewState::AwaitingAuthor), None);
+    }
 }

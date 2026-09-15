@@ -138,14 +138,15 @@ async fn fetch_pr_details(
     Ok((additions, deletions, draft))
 }
 
-/// Fetch PR review count (approved reviews) and check if authenticated user has reviewed
+/// Fetch PR review count (approved reviews), whether the authenticated user
+/// has reviewed, and the user's latest review timestamp
 async fn fetch_pr_reviews(
     client: &Octocrab,
     owner: &str,
     repo: &str,
     number: u64,
     auth_username: Option<&str>,
-) -> Result<(u32, bool)> {
+) -> Result<(u32, bool, Option<chrono::DateTime<chrono::Utc>>)> {
     let reviews = client
         .pulls(owner, repo)
         .list_reviews(number)
@@ -164,7 +165,19 @@ async fn fetch_pr_reviews(
         })
         .count() as u32;
 
-    // Check if authenticated user has reviewed (any review state counts)
+    // The user's reviews: any state counts, latest submitted_at is the anchor
+    let my_last_review_at = auth_username.and_then(|username| {
+        reviews
+            .items
+            .iter()
+            .filter(|r| {
+                r.user
+                    .as_ref()
+                    .is_some_and(|u| u.login.eq_ignore_ascii_case(username))
+            })
+            .filter_map(|r| r.submitted_at)
+            .max()
+    });
     let user_has_reviewed = auth_username.is_some_and(|username| {
         reviews.items.iter().any(|r| {
             r.user
@@ -173,7 +186,36 @@ async fn fetch_pr_reviews(
         })
     });
 
-    Ok((approved_count, user_has_reviewed))
+    Ok((approved_count, user_has_reviewed, my_last_review_at))
+}
+
+/// Fetch all issue timeline events for a PR (paginated).
+async fn fetch_pr_timeline(
+    client: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<Vec<serde_json::Value>> {
+    const PER_PAGE: usize = 100;
+    let mut events = Vec::new();
+    let mut page: u32 = 1;
+    loop {
+        let route = format!(
+            "/repos/{}/{}/issues/{}/timeline?per_page={}&page={}",
+            owner, repo, number, PER_PAGE, page
+        );
+        let batch: Vec<serde_json::Value> = client
+            .get(route, None::<&()>)
+            .await
+            .context("Failed to fetch PR timeline")?;
+        let batch_len = batch.len();
+        events.extend(batch);
+        if batch_len < PER_PAGE {
+            break;
+        }
+        page += 1;
+    }
+    Ok(events)
 }
 
 /// Fetch per-file diff data for a PR with pagination.
@@ -223,12 +265,94 @@ fn apply_size_exclusions(files: &[(String, u64, u64)], exclude_patterns: &[Strin
     Ok(total)
 }
 
+/// Partial review-cycle signals extracted from issue timeline events.
+#[derive(Debug, Default, PartialEq)]
+struct TimelineSignals {
+    last_commit_at: Option<chrono::DateTime<chrono::Utc>>,
+    mentioned_at: Option<chrono::DateTime<chrono::Utc>>,
+    review_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    my_last_comment_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Extract review-cycle signals from raw timeline events.
+///
+/// Recognized events (all others ignored):
+/// - `committed`: commit committer date -> last_commit_at
+/// - `head_ref_force_pushed`: event created_at -> last_commit_at (rebases can
+///   carry old committer dates, so the force-push event marks the update)
+/// - `mentioned` where actor is the user -> mentioned_at
+/// - `review_requested` where requested_reviewer is the user -> review_requested_at
+/// - `commented` where actor is the user -> my_last_comment_at
+fn parse_timeline_events(
+    events: &[serde_json::Value],
+    auth_username: Option<&str>,
+) -> TimelineSignals {
+    use chrono::{DateTime, Utc};
+
+    fn parse_date(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+        value.as_str().and_then(|s| s.parse().ok())
+    }
+
+    fn max_ts(current: &mut Option<DateTime<Utc>>, candidate: Option<DateTime<Utc>>) {
+        if let Some(candidate) = candidate {
+            if current.is_none_or(|existing| candidate > existing) {
+                *current = Some(candidate);
+            }
+        }
+    }
+
+    fn login_matches(value: &serde_json::Value, auth_username: Option<&str>) -> bool {
+        match (value["login"].as_str(), auth_username) {
+            (Some(login), Some(user)) => login.eq_ignore_ascii_case(user),
+            _ => false,
+        }
+    }
+
+    let mut signals = TimelineSignals::default();
+    for event in events {
+        match event["event"].as_str() {
+            Some("committed") => {
+                max_ts(
+                    &mut signals.last_commit_at,
+                    parse_date(&event["committer"]["date"]),
+                );
+            }
+            Some("head_ref_force_pushed") => {
+                max_ts(
+                    &mut signals.last_commit_at,
+                    parse_date(&event["created_at"]),
+                );
+            }
+            Some("mentioned") if login_matches(&event["actor"], auth_username) => {
+                max_ts(&mut signals.mentioned_at, parse_date(&event["created_at"]));
+            }
+            Some("review_requested")
+                if login_matches(&event["requested_reviewer"], auth_username) =>
+            {
+                max_ts(
+                    &mut signals.review_requested_at,
+                    parse_date(&event["created_at"]),
+                );
+            }
+            Some("commented") if login_matches(&event["actor"], auth_username) => {
+                max_ts(
+                    &mut signals.my_last_comment_at,
+                    parse_date(&event["created_at"]),
+                );
+            }
+            _ => {}
+        }
+    }
+    signals
+}
+
 /// Enrich a PR with detailed information (size and approvals)
 async fn enrich_pr(
     client: &Octocrab,
     pr: &mut PullRequest,
     auth_username: Option<&str>,
     exclude_patterns: &Option<Vec<String>>,
+    need_signals: bool,
 ) -> Result<()> {
     // Parse owner/repo from pr.repo field
     let parts: Vec<&str> = pr.repo.split('/').collect();
@@ -243,12 +367,36 @@ async fn enrich_pr(
     let reviews_fut = fetch_pr_reviews(client, owner, repo_name, pr.number, auth_username);
 
     match tokio::try_join!(details_fut, reviews_fut) {
-        Ok(((additions, deletions, draft), (approvals, user_has_reviewed))) => {
+        Ok(((additions, deletions, draft), (approvals, user_has_reviewed, my_last_review_at))) => {
             pr.additions = additions;
             pr.deletions = deletions;
             pr.draft = draft;
             pr.approvals = approvals;
             pr.user_has_reviewed = user_has_reviewed;
+            pr.signals.my_last_review_at = my_last_review_at;
+
+            // Review-cycle signals need a timeline walk; only pay for it when
+            // the feature is configured and the user has actually reviewed.
+            if need_signals && user_has_reviewed {
+                match fetch_pr_timeline(client, owner, repo_name, pr.number).await {
+                    Ok(events) => {
+                        let timeline = parse_timeline_events(&events, auth_username);
+                        pr.signals.my_last_comment_at = timeline.my_last_comment_at;
+                        pr.signals.last_commit_at = timeline.last_commit_at;
+                        pr.signals.mentioned_at = timeline.mentioned_at;
+                        pr.signals.review_requested_at = timeline.review_requested_at;
+                    }
+                    Err(e) => {
+                        buffered_eprintln!(
+                            "Warning: Failed to fetch timeline for PR {}: {}",
+                            pr.number,
+                            e
+                        );
+                        // Leave timeline signals as None — the PR stays in
+                        // the Active list rather than being wrongly hidden
+                    }
+                }
+            }
 
             // Conditionally fetch per-file data and apply size exclusions
             if let Some(ref patterns) = exclude_patterns {
@@ -296,6 +444,7 @@ async fn enrich_pr_with_rate_limit_check(
     rate_limited: Arc<AtomicBool>,
     auth_username: Option<String>,
     exclude_patterns: Option<Vec<String>>,
+    need_signals: bool,
 ) -> PullRequest {
     if rate_limited.load(Ordering::Relaxed) {
         return pr; // Skip enrichment if rate limited
@@ -306,6 +455,7 @@ async fn enrich_pr_with_rate_limit_check(
         &mut pr,
         auth_username.as_deref(),
         &exclude_patterns,
+        need_signals,
     )
     .await
     {
@@ -325,12 +475,17 @@ async fn enrich_pr_with_rate_limit_check(
     pr
 }
 
-/// Search and enrich PRs with full details
+/// Search and enrich PRs with full details.
+///
+/// `need_signals` enables the per-PR timeline walk that powers the
+/// since-my-review scoring factor and awaiting-author suppression; it is
+/// only performed for PRs the user has reviewed.
 pub async fn search_and_enrich_prs(
     client: &Octocrab,
     query: &str,
     auth_username: Option<&str>,
     exclude_patterns: Option<Vec<String>>,
+    need_signals: bool,
 ) -> Result<Vec<PullRequest>> {
     let prs = search_prs(client, query).await?;
 
@@ -353,6 +508,7 @@ pub async fn search_and_enrich_prs(
                 rate_limited.clone(),
                 auth_username.map(|s| s.to_string()),
                 exclude_patterns.clone(),
+                need_signals,
             ));
         }
     }
@@ -370,6 +526,7 @@ pub async fn search_and_enrich_prs(
                     rate_limited.clone(),
                     auth_username.map(|s| s.to_string()),
                     exclude_patterns.clone(),
+                    need_signals,
                 ));
             }
         }
@@ -516,5 +673,328 @@ mod tests {
             "expected PRs from all pages, got {}",
             prs.len()
         );
+    }
+
+    // --- parse_timeline_events ---
+
+    fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+        s.parse().unwrap()
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Timeline committed events must yield last_commit_at.
+    #[test]
+    fn timeline_extracts_commit_dates() {
+        let events = vec![
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-03T10:00:00Z" }
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(signals.last_commit_at, Some(ts("2026-09-03T10:00:00Z")));
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Force-pushes must count as commit activity.
+    #[test]
+    fn timeline_force_push_counts_as_commit_activity() {
+        let events = vec![
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-08-01T10:00:00Z" }
+            }),
+            // Rebase pushed old commits; the force-push event is newer.
+            json!({
+                "event": "head_ref_force_pushed",
+                "actor": { "login": "author" },
+                "created_at": "2026-09-05T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(signals.last_commit_at, Some(ts("2026-09-05T10:00:00Z")));
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Only my mentions count, matched case-insensitively.
+    #[test]
+    fn timeline_extracts_mentions_of_user_only() {
+        let events = vec![
+            json!({
+                "event": "mentioned",
+                "actor": { "login": "someone-else" },
+                "created_at": "2026-09-06T10:00:00Z"
+            }),
+            json!({
+                "event": "mentioned",
+                "actor": { "login": "Me" },
+                "created_at": "2026-09-04T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(signals.mentioned_at, Some(ts("2026-09-04T10:00:00Z")));
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Only re-requests aimed at me count.
+    #[test]
+    fn timeline_extracts_review_requests_for_user_only() {
+        let events = vec![
+            json!({
+                "event": "review_requested",
+                "requested_reviewer": { "login": "someone-else" },
+                "created_at": "2026-09-06T10:00:00Z"
+            }),
+            json!({
+                "event": "review_requested",
+                "requested_reviewer": { "login": "me" },
+                "created_at": "2026-09-05T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(
+            signals.review_requested_at,
+            Some(ts("2026-09-05T10:00:00Z"))
+        );
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Only my comments move the activity anchor.
+    #[test]
+    fn timeline_extracts_my_comments_only() {
+        let events = vec![
+            json!({
+                "event": "commented",
+                "actor": { "login": "me" },
+                "created_at": "2026-09-02T10:00:00Z"
+            }),
+            json!({
+                "event": "commented",
+                "actor": { "login": "someone-else" },
+                "created_at": "2026-09-06T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(signals.my_last_comment_at, Some(ts("2026-09-02T10:00:00Z")));
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Malformed timeline entries must be skipped, not crash.
+    #[test]
+    fn timeline_ignores_unknown_events_and_missing_fields() {
+        let events = vec![
+            json!({ "event": "labeled", "created_at": "2026-09-06T10:00:00Z" }),
+            json!({ "event": "committed" }),
+            json!({ "event": "mentioned", "created_at": "2026-09-06T10:00:00Z" }),
+            json!({}),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert_eq!(signals, TimelineSignals::default());
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // No auth username: commits still tracked, user signals off.
+    #[test]
+    fn timeline_without_username_still_tracks_commits() {
+        let events = vec![
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+            json!({
+                "event": "mentioned",
+                "actor": { "login": "me" },
+                "created_at": "2026-09-02T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, None);
+        assert_eq!(signals.last_commit_at, Some(ts("2026-09-01T10:00:00Z")));
+        assert_eq!(signals.mentioned_at, None);
+    }
+
+    // --- enrichment wiring for review signals ---
+
+    fn pull_details_json(number: u64) -> serde_json::Value {
+        json!({
+            "id": number,
+            "number": number,
+            "url": format!("https://api.github.com/repos/o/r/pulls/{}", number),
+            "head": { "ref": "feature", "sha": "abc123" },
+            "base": { "ref": "main", "sha": "def456" },
+            "locked": false,
+            "state": "open",
+            "additions": 4,
+            "deletions": 2,
+            "draft": false
+        })
+    }
+
+    fn reviews_json() -> serde_json::Value {
+        json!([
+            {
+                "id": 900,
+                "node_id": "R_900",
+                "html_url": "https://github.com/o/r/pull/5#pullrequestreview-900",
+                "user": author_json("me"),
+                "state": "APPROVED",
+                "submitted_at": "2026-09-01T00:00:00Z"
+            },
+            {
+                "id": 901,
+                "node_id": "R_901",
+                "html_url": "https://github.com/o/r/pull/5#pullrequestreview-901",
+                "user": author_json("me"),
+                "state": "COMMENTED",
+                "submitted_at": "2026-09-02T00:00:00Z"
+            },
+            {
+                "id": 902,
+                "node_id": "R_902",
+                "html_url": "https://github.com/o/r/pull/5#pullrequestreview-902",
+                "user": author_json("someone-else"),
+                "state": "APPROVED",
+                "submitted_at": "2026-09-03T00:00:00Z"
+            }
+        ])
+    }
+
+    async fn mount_common_enrichment_mocks(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(search_body(vec![pr_issue_json(5, "o", "r")])),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pull_details_json(5)))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/5/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(reviews_json()))
+            .mount(server)
+            .await;
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // Enrichment must populate signals via paginated timeline.
+    #[tokio::test]
+    async fn enrichment_populates_review_signals_from_timeline() {
+        let server = MockServer::start().await;
+        mount_common_enrichment_mocks(&server).await;
+
+        // Two timeline pages to prove pagination: a full page of noise, then
+        // the interesting events.
+        let full_page: Vec<serde_json::Value> = (0..100)
+            .map(|_| json!({ "event": "labeled", "created_at": "2026-08-01T00:00:00Z" }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_page))
+            .mount(&server)
+            .await;
+        let page2 = json!([
+            {
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-04T00:00:00Z" }
+            },
+            {
+                "event": "commented",
+                "actor": { "login": "me" },
+                "created_at": "2026-09-05T00:00:00Z"
+            },
+            {
+                "event": "mentioned",
+                "actor": { "login": "me" },
+                "created_at": "2026-09-06T00:00:00Z"
+            },
+            {
+                "event": "review_requested",
+                "requested_reviewer": { "login": "me" },
+                "created_at": "2026-09-07T00:00:00Z"
+            }
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let prs = search_and_enrich_prs(&client, "review-requested:@me", Some("me"), None, true)
+            .await
+            .expect("search_and_enrich_prs should succeed");
+
+        assert_eq!(prs.len(), 1);
+        let pr = &prs[0];
+        assert_eq!(pr.approvals, 2);
+        assert!(pr.user_has_reviewed);
+        assert_eq!(
+            pr.signals.my_last_review_at,
+            Some(ts("2026-09-02T00:00:00Z"))
+        );
+        assert_eq!(
+            pr.signals.my_last_comment_at,
+            Some(ts("2026-09-05T00:00:00Z"))
+        );
+        assert_eq!(pr.signals.last_commit_at, Some(ts("2026-09-04T00:00:00Z")));
+        assert_eq!(pr.signals.mentioned_at, Some(ts("2026-09-06T00:00:00Z")));
+        assert_eq!(
+            pr.signals.review_requested_at,
+            Some(ts("2026-09-07T00:00:00Z"))
+        );
+    }
+
+    // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
+    // No timeline API calls unless the feature is configured.
+    #[tokio::test]
+    async fn enrichment_skips_timeline_when_signals_not_needed() {
+        let server = MockServer::start().await;
+        mount_common_enrichment_mocks(&server).await;
+
+        // No timeline mock mounted: a timeline call would 404 and, more to
+        // the point, need_signals=false must not even attempt it.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let prs = search_and_enrich_prs(&client, "review-requested:@me", Some("me"), None, false)
+            .await
+            .expect("search_and_enrich_prs should succeed");
+
+        assert_eq!(prs.len(), 1);
+        let pr = &prs[0];
+        assert!(pr.user_has_reviewed);
+        // Review timestamp comes from the reviews call either way; timeline
+        // signals stay unset.
+        assert_eq!(
+            pr.signals.my_last_review_at,
+            Some(ts("2026-09-02T00:00:00Z"))
+        );
+        assert_eq!(pr.signals.last_commit_at, None);
+        assert_eq!(pr.signals.mentioned_at, None);
     }
 }

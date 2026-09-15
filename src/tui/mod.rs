@@ -95,8 +95,8 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
             if handle.is_finished() {
                 let handle = pending_fetch.take().unwrap();
                 match handle.await {
-                    Ok(Ok(Ok((active, snoozed, rate_limit)))) => {
-                        app.update_prs(active, snoozed, rate_limit);
+                    Ok(Ok(Ok(fetched))) => {
+                        app.update_prs(fetched);
                     }
                     Ok(Ok(Err(e))) => {
                         if e.downcast_ref::<crate::fetch::AuthError>().is_some() {
