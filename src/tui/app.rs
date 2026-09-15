@@ -238,6 +238,17 @@ impl App {
         }
     }
 
+    /// All scores across active and snoozed rows: the full distribution
+    /// score tiers are computed from, so colors are stable across views
+    /// and don't jump when a row is snoozed.
+    pub fn score_pool(&self) -> Vec<f64> {
+        self.active_prs
+            .iter()
+            .chain(self.snoozed_prs.iter())
+            .map(|(_, result)| result.score)
+            .collect()
+    }
+
     pub fn next_row(&mut self) {
         let prs = self.current_prs();
         if prs.is_empty() {
@@ -847,6 +858,16 @@ mod tests {
         app.current_view = View::Snoozed;
         app.table_state.select(Some(0));
         app
+    }
+
+    #[test]
+    fn score_pool_includes_active_and_snoozed() {
+        let mut app = test_app("score-pool");
+        app.active_prs = vec![scored("https://x/1", 100.0)];
+        app.snoozed_prs = vec![scored("https://x/2", 500.0), scored("https://x/3", 20.0)];
+        let mut pool = app.score_pool();
+        pool.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(pool, vec![20.0, 100.0, 500.0]);
     }
 
     // LOCKED: regression for lost wake tags on snoozed rows (pr-pal#2 Copilot review).
