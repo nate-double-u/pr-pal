@@ -350,6 +350,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
         queries,
         auto_refresh_interval: 300,
         theme: "auto".to_string(),
+        suppress: None,
     };
 
     let yaml = serde_saphyr::to_string(&config)
