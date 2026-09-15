@@ -158,7 +158,10 @@ impl ThemeColors {
 
     /// Returns the color for a score's tier within the given distribution
     pub fn tier_color(&self, score: f64, tiers: &ScoreTiers) -> Color {
-        if score >= tiers.hot {
+        if score <= 0.0 {
+            // Floored scores are the lowest priority; their bars are empty.
+            Color::Reset
+        } else if score >= tiers.hot {
             self.score_high
         } else if score > tiers.warm {
             self.score_mid
@@ -333,5 +336,20 @@ mod tests {
         // An empty pool colors nothing.
         let tiers = ScoreTiers::from_scores(&[]);
         assert_eq!(colors.tier_color(5.0, &tiers), Color::Reset);
+    }
+
+    // LOCKED: regression for zero-score tier coloring (pr-pal#3 Copilot review).
+    // The engine floors scores at 0.0; a zero score is the lowest possible
+    // priority and its bar is empty, so it must stay uncolored even when
+    // tier thresholds collapse to zero.
+    #[test]
+    fn zero_scores_stay_uncolored() {
+        let colors = ThemeColors::dark();
+        // Tail mean of zero: a zero row must not turn green.
+        let tiers = ScoreTiers::from_scores(&[100.0, 0.0, 0.0]);
+        assert_eq!(colors.tier_color(0.0, &tiers), Color::Reset);
+        // All-zero pool: thresholds collapse to zero; rows must not go red.
+        let tiers = ScoreTiers::from_scores(&[0.0, 0.0]);
+        assert_eq!(colors.tier_color(0.0, &tiers), Color::Reset);
     }
 }
