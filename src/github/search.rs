@@ -69,6 +69,7 @@ pub async fn search_prs(client: &Octocrab, query: &str) -> Result<Vec<PullReques
                             labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
                             user_has_reviewed: false, // Will be populated by enrichment
                             filtered_size: None, // Will be set by enrich_pr if exclude patterns configured
+                            signals: Default::default(), // Populated by enrichment
                         }
                     })
                     .collect();

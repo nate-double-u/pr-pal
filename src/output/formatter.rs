@@ -258,6 +258,7 @@ mod tests {
             labels: vec![],
             user_has_reviewed: false,
             filtered_size: None,
+            signals: Default::default(),
         }
     }
 

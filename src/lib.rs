@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod fetch;
 pub mod github;
 pub mod output;
+pub mod review_state;
 pub mod scoring;
 pub mod snooze;
 pub mod stderr_buffer;

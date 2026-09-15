@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 
+use crate::review_state::ReviewSignals;
+
 #[derive(Debug, Clone)]
 pub struct PullRequest {
     pub title: String,
@@ -16,6 +18,7 @@ pub struct PullRequest {
     pub labels: Vec<String>,        // GitHub label names on this PR
     pub user_has_reviewed: bool,    // Whether the authenticated user has submitted a review
     pub filtered_size: Option<u64>, // Size after applying exclude patterns (if configured)
+    pub signals: ReviewSignals,     // Review-cycle timestamps (populated by enrichment)
 }
 
 impl PullRequest {
