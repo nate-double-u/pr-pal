@@ -4,7 +4,7 @@ This document covers the full configuration options for PR Pal. For a quick-star
 
 Configuration file location: `~/.config/pr-pal/config.yaml`
 
-Upgrading from PR Bro? Move your existing configuration once: `mv ~/.config/pr-bro ~/.config/pr-pal`
+Upgrading from PR Bro? Move your existing configuration once: `mv ~/.config/pr-bro ~/.config/pr-pal`. If you set `PR_BRO_GH_TOKEN` in your shell profile, rename it to `PR_PAL_GH_TOKEN`.
 
 ## Full Configuration Example
 

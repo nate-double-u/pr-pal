@@ -20,10 +20,10 @@ Platform-specific cache directory:
 
 ```bash
 # Disable caching for one run
-pr-pal --no-cache
+cargo run --release -- --no-cache
 
 # Clear all cached responses
-pr-pal --clear-cache
+cargo run --release -- --clear-cache
 ```
 
 Clearing cache removes all stored API responses but preserves configuration and snooze state.

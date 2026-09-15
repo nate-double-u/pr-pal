@@ -26,7 +26,7 @@ pub fn get_token_from_env() -> Option<String> {
 mod tests {
     // LOCKED: merge guard for the pr-pal token env var (PR #6). The fork
     // reads PR_PAL_GH_TOKEN; an upstream merge must not revert it to
-    // upstream's PR_PAL_GH_TOKEN.
+    // upstream's PR_BRO_GH_TOKEN.
     #[test]
     fn token_env_var_is_pr_pal() {
         assert_eq!(super::ENV_TOKEN_VAR, "PR_PAL_GH_TOKEN");

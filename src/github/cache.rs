@@ -263,6 +263,14 @@ mod tests {
         std::env::temp_dir().join(format!("pr-pal-test-cache-{}-{}", test_name, timestamp))
     }
 
+    // LOCKED: merge guard for the pr-pal cache namespace (PR #6). The fork
+    // caches under pr-pal/http-cache, not upstream's pr-bro; an upstream
+    // merge must not silently restore the old namespace.
+    #[test]
+    fn cache_path_is_pr_pal() {
+        assert!(get_cache_path().ends_with("pr-pal/http-cache"));
+    }
+
     #[test]
     fn test_valid_json_is_cached() {
         let cache_path = unique_cache_path("valid");
