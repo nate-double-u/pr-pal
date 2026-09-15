@@ -461,6 +461,24 @@ impl App {
         self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
     }
 
+    /// Whether a snoozed row would still be suppressed (awaiting author)
+    /// given its current signals and the active policy. Refreshes update
+    /// signals while undo entries survive them, so undo re-evaluates rather
+    /// than trusting its snapshot. Without a resolvable policy or row, the
+    /// snapshot stands.
+    fn still_suppressed_now(&self, url: &str) -> bool {
+        let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
+            .ok()
+            .flatten();
+        let Some(policy) = policy else {
+            return true;
+        };
+        let Some((pr, _)) = self.snoozed_prs.iter().find(|(pr, _)| pr.url == url) else {
+            return true;
+        };
+        crate::snooze::is_suppressed_by_policy(&pr.signals, &policy, Utc::now())
+    }
+
     /// Undo the last snooze or unsnooze action
     pub fn undo_last(&mut self) {
         let action = match self.undo_stack.pop_front() {
@@ -488,9 +506,10 @@ impl App {
                     return;
                 }
 
-                if was_suppressed {
-                    // The row was awaiting-author before the snooze; restore
-                    // that state instead of activating it (no wake occurred).
+                if was_suppressed && self.still_suppressed_now(&url) {
+                    // The row was awaiting-author before the snooze and its
+                    // current signals still say so; restore that state
+                    // instead of activating it.
                     self.suppressed_urls.insert(url.clone());
                     self.show_flash(format!("Undid snooze: {} (awaiting author)", title));
                 } else {
@@ -858,6 +877,44 @@ mod tests {
         );
         assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
         assert!(app.active_prs.is_empty());
+    }
+
+    // LOCKED: regression for stale undo suppression snapshot (pr-pal#2 Copilot review).
+    // Undo must re-evaluate the row's current signals: if a wake event
+    // arrived (via refresh) while the row was manually snoozed, undoing the
+    // snooze activates it instead of restoring a stale awaiting-author state.
+    #[test]
+    fn undo_snooze_reevaluates_signals_and_activates_woken_row() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("undo-reeval", url);
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![
+                crate::config::WakeEvent::Push,
+                crate::config::WakeEvent::Mention,
+                crate::config::WakeEvent::ReviewRequest,
+            ],
+            resurface_after: "21d".to_string(),
+        });
+        // Reviewed 5 days ago, nothing since: genuinely suppressed.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+
+        // A refresh delivered new signals while snoozed: the author pushed.
+        app.snoozed_prs[0].0.signals.last_commit_at = Some(Utc::now() - Duration::hours(1));
+
+        app.undo_last();
+
+        assert!(!app.snooze_state.is_snoozed(url));
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "woken row must not be re-suppressed"
+        );
+        assert_eq!(app.active_prs.len(), 1, "woken row must activate");
+        assert!(app.snoozed_prs.is_empty());
     }
 
     #[test]

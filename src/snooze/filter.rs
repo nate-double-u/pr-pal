@@ -69,20 +69,8 @@ pub fn partition_prs(
             partitioned.snoozed.push(pr);
             continue;
         }
-        let suppressed = policy.is_some_and(|policy| {
-            match review_state(&pr.signals, now, policy.resurface_after) {
-                ReviewState::AwaitingAuthor => true,
-                // A wake state reports only the highest-priority event; any
-                // configured event after the anchor must still wake the PR
-                // (a push must not mask a configured mention), and an
-                // unconfigured event must not block the resurface valve.
-                ReviewState::Pushed | ReviewState::Mentioned | ReviewState::ReviewRequested => {
-                    !any_configured_wake(&pr.signals, policy)
-                        && !valve_elapsed(&pr.signals, now, policy.resurface_after)
-                }
-                ReviewState::NotReviewed | ReviewState::Stalled => false,
-            }
-        });
+        let suppressed =
+            policy.is_some_and(|policy| is_suppressed_by_policy(&pr.signals, policy, now));
         if suppressed {
             partitioned.suppressed.push(pr);
         } else {
@@ -91,6 +79,29 @@ pub fn partition_prs(
     }
 
     partitioned
+}
+
+/// Should this PR be hidden as awaiting-author under the given policy?
+///
+/// Shared by `partition_prs` and the TUI undo path so suppression decisions
+/// always reflect the PR's current signals.
+pub fn is_suppressed_by_policy(
+    signals: &ReviewSignals,
+    policy: &SuppressPolicy,
+    now: DateTime<Utc>,
+) -> bool {
+    match review_state(signals, now, policy.resurface_after) {
+        ReviewState::AwaitingAuthor => true,
+        // A wake state reports only the highest-priority event; any
+        // configured event after the anchor must still wake the PR (a push
+        // must not mask a configured mention), and an unconfigured event
+        // must not block the resurface valve.
+        ReviewState::Pushed | ReviewState::Mentioned | ReviewState::ReviewRequested => {
+            !any_configured_wake(signals, policy)
+                && !valve_elapsed(signals, now, policy.resurface_after)
+        }
+        ReviewState::NotReviewed | ReviewState::Stalled => false,
+    }
 }
 
 /// True when any event in the policy's `wake_on` occurred after the anchor.
