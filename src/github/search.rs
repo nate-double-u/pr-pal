@@ -395,8 +395,11 @@ async fn enrich_pr(
                             pr.number,
                             e
                         );
-                        // Leave timeline signals as None — the PR stays in
-                        // the Active list rather than being wrongly hidden
+                        // Fail open: without timeline data the review anchor
+                        // would classify this PR as awaiting-author and hide
+                        // it. Clear the anchor so it stays active;
+                        // user_has_reviewed is kept for legacy scoring.
+                        pr.signals.my_last_review_at = None;
                     }
                 }
             }
@@ -1042,6 +1045,39 @@ mod tests {
         assert_eq!(
             pr.signals.my_last_review_at,
             Some(ts("2026-09-05T00:00:00Z"))
+        );
+    }
+
+    // LOCKED: regression for timeline fetch failure (pr-pal#2 Copilot review).
+    // A failed timeline fetch must fail open: clear the review anchor so the
+    // PR stays active instead of being suppressed as awaiting-author.
+    #[tokio::test]
+    async fn enrichment_fails_open_when_timeline_errors() {
+        let server = MockServer::start().await;
+        mount_common_enrichment_mocks(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let prs = search_and_enrich_prs(&client, "review-requested:@me", Some("me"), None, true)
+            .await
+            .expect("search_and_enrich_prs should succeed");
+
+        assert_eq!(prs.len(), 1);
+        let pr = &prs[0];
+        assert!(pr.user_has_reviewed, "legacy scoring signal is preserved");
+        assert_eq!(
+            pr.signals.my_last_review_at, None,
+            "anchor must clear so the PR is not suppressed on API failure"
         );
     }
 
