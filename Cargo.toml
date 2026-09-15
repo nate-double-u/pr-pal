@@ -36,6 +36,9 @@ glob = "0.3"
 semver = "1"
 terminal-light = "1.8"
 
+[dev-dependencies]
+wiremock = "0.6"
+
 [profile.release]
 opt-level = 3
 lto = true
