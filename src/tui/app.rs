@@ -4,6 +4,7 @@ use crate::github::types::PullRequest;
 use crate::review_state::{review_state, ReviewState};
 use crate::scoring::ScoreResult;
 use crate::snooze::SnoozeState;
+use crate::snooze::SuppressPolicy;
 use crate::tui::theme::{Theme, ThemeColors};
 use crate::version_check::VersionStatus;
 use chrono::{DateTime, Utc};
@@ -35,14 +36,24 @@ pub fn merge_snoozed_lists(
 }
 
 /// Compute the review-cycle state for each PR (keyed by URL), used to tag
-/// Active rows with the reason a PR resurfaced.
+/// Active rows with the reason a PR resurfaced. With a suppress policy the
+/// tag reflects the effective wake (same rules as partitioning); without one
+/// it falls back to the raw review state.
 pub fn compute_review_states(
     prs: &[(PullRequest, ScoreResult)],
-    valve: Option<chrono::Duration>,
+    policy: Option<&SuppressPolicy>,
     now: DateTime<Utc>,
 ) -> HashMap<String, ReviewState> {
     prs.iter()
-        .map(|(pr, _)| (pr.url.clone(), review_state(&pr.signals, now, valve)))
+        .map(|(pr, _)| {
+            let state = match policy {
+                Some(policy) => {
+                    crate::snooze::filter::effective_review_state(&pr.signals, policy, now)
+                }
+                None => review_state(&pr.signals, now, None),
+            };
+            (pr.url.clone(), state)
+        })
         .collect()
 }
 
@@ -650,12 +661,12 @@ impl App {
         // Suppressed PRs share the Snoozed view, tagged "awaiting author"
         let (snoozed_merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
 
-        // Wake-reason tags for Active rows (valve from the suppress config)
-        let valve = crate::snooze::suppress_policy(self.config.suppress.as_ref())
+        // Wake-reason tags for Active rows, derived from the same effective
+        // policy that partitioning uses
+        let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
             .ok()
-            .flatten()
-            .and_then(|p| p.resurface_after);
-        self.review_states = compute_review_states(&active, valve, Utc::now());
+            .flatten();
+        self.review_states = compute_review_states(&active, policy.as_ref(), Utc::now());
 
         // Replace PR lists
         self.active_prs = active;
@@ -982,8 +993,40 @@ mod tests {
             ScoreResult::default(),
         );
 
-        let states = compute_review_states(&[stalled], Some(Duration::days(21)), now);
+        let policy = crate::snooze::SuppressPolicy {
+            wake_on: vec![],
+            resurface_after: Some(Duration::days(21)),
+        };
+        let states = compute_review_states(&[stalled], Some(&policy), now);
 
         assert_eq!(states.get("https://x/stalled"), Some(&ReviewState::Stalled));
+    }
+
+    // LOCKED: regression for policy-aware wake tags (pr-pal#2 Copilot review).
+    // Tags must reflect the effective policy: with wake_on [mention], a PR
+    // that was pushed then mentioned tags as (mentioned), not (updated).
+    #[test]
+    fn compute_review_states_respects_wake_policy() {
+        let now = ts("2026-09-10T00:00:00Z");
+        let pr = (
+            test_pr(
+                "https://x/mixed",
+                ReviewSignals {
+                    my_last_review_at: Some(ts("2026-09-01T00:00:00Z")),
+                    last_commit_at: Some(ts("2026-09-02T00:00:00Z")),
+                    mentioned_at: Some(ts("2026-09-03T00:00:00Z")),
+                    ..Default::default()
+                },
+            ),
+            ScoreResult::default(),
+        );
+        let policy = crate::snooze::SuppressPolicy {
+            wake_on: vec![crate::config::WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+
+        let states = compute_review_states(&[pr], Some(&policy), now);
+
+        assert_eq!(states.get("https://x/mixed"), Some(&ReviewState::Mentioned));
     }
 }

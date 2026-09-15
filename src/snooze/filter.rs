@@ -1,7 +1,7 @@
 use super::types::SnoozeState;
 use crate::config::{SuppressConfig, WakeEvent};
 use crate::github::types::PullRequest;
-use crate::review_state::{review_anchor, review_state, ReviewSignals, ReviewState};
+use crate::review_state::{review_anchor, ReviewSignals, ReviewState};
 use chrono::{DateTime, Duration, Utc};
 
 /// Filter out snoozed PRs, returning only active (non-snoozed) PRs
@@ -90,31 +90,37 @@ pub fn is_suppressed_by_policy(
     policy: &SuppressPolicy,
     now: DateTime<Utc>,
 ) -> bool {
-    match review_state(signals, now, policy.resurface_after) {
-        ReviewState::AwaitingAuthor => true,
-        // A wake state reports only the highest-priority event; any
-        // configured event after the anchor must still wake the PR (a push
-        // must not mask a configured mention), and an unconfigured event
-        // must not block the resurface valve.
-        ReviewState::Pushed | ReviewState::Mentioned | ReviewState::ReviewRequested => {
-            !any_configured_wake(signals, policy)
-                && !valve_elapsed(signals, now, policy.resurface_after)
-        }
-        ReviewState::NotReviewed | ReviewState::Stalled => false,
-    }
+    effective_review_state(signals, policy, now) == ReviewState::AwaitingAuthor
 }
 
-/// True when any event in the policy's `wake_on` occurred after the anchor.
-fn any_configured_wake(signals: &ReviewSignals, policy: &SuppressPolicy) -> bool {
+/// The review-cycle state as the active policy sees it.
+///
+/// The strongest *configured* wake event after the anchor wins (a push must
+/// not mask a configured mention); with none, an elapsed valve means
+/// `Stalled`; otherwise the PR is `AwaitingAuthor`. This is the single
+/// source of truth for both partitioning and the displayed wake tags.
+pub fn effective_review_state(
+    signals: &ReviewSignals,
+    policy: &SuppressPolicy,
+    now: DateTime<Utc>,
+) -> ReviewState {
     let Some(anchor) = review_anchor(signals) else {
-        return false;
+        return ReviewState::NotReviewed;
     };
     let after = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t > anchor);
-    policy.wake_on.iter().any(|event| match event {
-        WakeEvent::Push => after(signals.last_commit_at),
-        WakeEvent::Mention => after(signals.mentioned_at),
-        WakeEvent::ReviewRequest => after(signals.review_requested_at),
-    })
+    let configured = |e: WakeEvent| policy.wake_on.contains(&e);
+
+    if configured(WakeEvent::Push) && after(signals.last_commit_at) {
+        ReviewState::Pushed
+    } else if configured(WakeEvent::Mention) && after(signals.mentioned_at) {
+        ReviewState::Mentioned
+    } else if configured(WakeEvent::ReviewRequest) && after(signals.review_requested_at) {
+        ReviewState::ReviewRequested
+    } else if valve_elapsed(signals, now, policy.resurface_after) {
+        ReviewState::Stalled
+    } else {
+        ReviewState::AwaitingAuthor
+    }
 }
 
 /// True when the resurface valve has elapsed since the review anchor.
@@ -371,6 +377,53 @@ mod tests {
         let result = partition_prs(vec![pr], &SnoozeState::new(), Some(&policy), Utc::now());
         assert_eq!(result.active.len(), 1, "valve must resurface the PR");
         assert!(result.suppressed.is_empty());
+    }
+
+    // LOCKED: regression for policy-aware wake tags (pr-pal#2 Copilot review).
+    // The displayed wake reason must come from the same effective policy as
+    // partitioning: the strongest *configured* event wins, and unconfigured
+    // events fall through to the valve.
+    #[test]
+    fn effective_state_reports_strongest_configured_event() {
+        let now = Utc::now();
+        let mut signals = crate::review_state::ReviewSignals {
+            my_last_review_at: Some(now - Duration::days(5)),
+            ..Default::default()
+        };
+        signals.last_commit_at = Some(now - Duration::days(2));
+        signals.mentioned_at = Some(now - Duration::days(1));
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+        assert_eq!(
+            effective_review_state(&signals, &policy, now),
+            ReviewState::Mentioned,
+            "the configured mention is the effective wake, not the push"
+        );
+    }
+
+    // LOCKED: regression for policy-aware wake tags (pr-pal#2 Copilot review).
+    // With only unconfigured events and the valve elapsed, the effective
+    // state is Stalled, matching the partition outcome.
+    #[test]
+    fn effective_state_stalls_past_valve_despite_unconfigured_event() {
+        let now = Utc::now();
+        let mut signals = crate::review_state::ReviewSignals {
+            my_last_review_at: Some(now - Duration::days(30)),
+            ..Default::default()
+        };
+        signals.last_commit_at = Some(now - Duration::days(25));
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+        assert_eq!(
+            effective_review_state(&signals, &policy, now),
+            ReviewState::Stalled
+        );
     }
 
     // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
