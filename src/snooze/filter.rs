@@ -27,15 +27,21 @@ pub struct SuppressPolicy {
 }
 
 /// Build the active suppression policy from config.
-/// Returns `Ok(None)` when suppression is absent or disabled.
+/// Returns `Ok(None)` when suppression is absent or disabled. The duration
+/// is validated whenever the block is present, so a disabled block cannot
+/// hide a bad `resurface_after` until the feature is enabled.
 pub fn suppress_policy(config: Option<&SuppressConfig>) -> Result<Option<SuppressPolicy>, String> {
-    match config {
-        Some(cfg) if cfg.awaiting_author => Ok(Some(SuppressPolicy {
-            wake_on: cfg.wake_on.clone(),
-            resurface_after: cfg.resurface_duration()?,
-        })),
-        _ => Ok(None),
+    let Some(cfg) = config else {
+        return Ok(None);
+    };
+    let resurface_after = cfg.resurface_duration()?;
+    if !cfg.awaiting_author {
+        return Ok(None);
     }
+    Ok(Some(SuppressPolicy {
+        wake_on: cfg.wake_on.clone(),
+        resurface_after,
+    }))
 }
 
 /// PRs split by visibility: Active list, suppressed (awaiting author), and
@@ -510,6 +516,21 @@ mod tests {
     fn suppress_policy_propagates_invalid_duration() {
         let cfg = SuppressConfig {
             awaiting_author: true,
+            wake_on: vec![WakeEvent::Push],
+            resurface_after: "eleventy".to_string(),
+        };
+        let err = suppress_policy(Some(&cfg)).unwrap_err();
+        assert!(err.contains("suppress.resurface_after"));
+    }
+
+    // LOCKED: regression for disabled-block duration validation (pr-pal#2 Copilot review).
+    // awaiting_author: false must not bypass resurface_after validation at
+    // startup; a latent bad value would only explode once the feature is
+    // enabled.
+    #[test]
+    fn suppress_policy_validates_duration_even_when_disabled() {
+        let cfg = SuppressConfig {
+            awaiting_author: false,
             wake_on: vec![WakeEvent::Push],
             resurface_after: "eleventy".to_string(),
         };
