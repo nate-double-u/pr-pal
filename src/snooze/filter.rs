@@ -74,9 +74,11 @@ pub fn partition_prs(
                 ReviewState::AwaitingAuthor => true,
                 // A wake state reports only the highest-priority event; any
                 // configured event after the anchor must still wake the PR
-                // (a push must not mask a configured mention).
+                // (a push must not mask a configured mention), and an
+                // unconfigured event must not block the resurface valve.
                 ReviewState::Pushed | ReviewState::Mentioned | ReviewState::ReviewRequested => {
                     !any_configured_wake(&pr.signals, policy)
+                        && !valve_elapsed(&pr.signals, now, policy.resurface_after)
                 }
                 ReviewState::NotReviewed | ReviewState::Stalled => false,
             }
@@ -102,6 +104,18 @@ fn any_configured_wake(signals: &ReviewSignals, policy: &SuppressPolicy) -> bool
         WakeEvent::Mention => after(signals.mentioned_at),
         WakeEvent::ReviewRequest => after(signals.review_requested_at),
     })
+}
+
+/// True when the resurface valve has elapsed since the review anchor.
+fn valve_elapsed(
+    signals: &ReviewSignals,
+    now: DateTime<Utc>,
+    resurface_after: Option<Duration>,
+) -> bool {
+    match (review_anchor(signals), resurface_after) {
+        (Some(anchor), Some(valve)) => now - anchor > valve,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +342,24 @@ mod tests {
         let result = partition_prs(vec![pr], &SnoozeState::new(), Some(&policy), Utc::now());
         assert!(result.active.is_empty());
         assert_eq!(result.suppressed.len(), 1);
+    }
+
+    // LOCKED: regression for valve masking (pr-pal#2 Copilot review).
+    // An occurred-but-unconfigured event must not block the resurface valve:
+    // with wake_on [mention] and an old unconfigured push, a PR quiet past
+    // resurface_after still resurfaces.
+    #[test]
+    fn partition_valve_fires_despite_unconfigured_event() {
+        let mut pr = reviewed_pr(1, "https://x/1", 30);
+        pr.signals.last_commit_at = Some(Utc::now() - Duration::days(25));
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+        let result = partition_prs(vec![pr], &SnoozeState::new(), Some(&policy), Utc::now());
+        assert_eq!(result.active.len(), 1, "valve must resurface the PR");
+        assert!(result.suppressed.is_empty());
     }
 
     // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
