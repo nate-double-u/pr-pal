@@ -110,7 +110,9 @@ pub fn effective_review_state(
     let after = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t > anchor);
     let configured = |e: WakeEvent| policy.wake_on.contains(&e);
 
-    if configured(WakeEvent::Push) && after(signals.last_commit_at) {
+    if configured(WakeEvent::Push)
+        && (after(signals.last_commit_at) || signals.commit_after_my_activity)
+    {
         ReviewState::Pushed
     } else if configured(WakeEvent::Mention) && after(signals.mentioned_at) {
         ReviewState::Mentioned
@@ -424,6 +426,30 @@ mod tests {
             effective_review_state(&signals, &policy, now),
             ReviewState::Stalled
         );
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // A late push of old-dated commits must wake a suppressed PR when push
+    // is a configured wake event.
+    #[test]
+    fn effective_state_wakes_on_stream_order_push_flag() {
+        let now = Utc::now();
+        let mut signals = crate::review_state::ReviewSignals {
+            my_last_review_at: Some(now - Duration::days(1)),
+            ..Default::default()
+        };
+        signals.last_commit_at = Some(now - Duration::days(3));
+        signals.commit_after_my_activity = true;
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::Push],
+            resurface_after: Some(Duration::days(21)),
+        };
+        assert_eq!(
+            effective_review_state(&signals, &policy, now),
+            ReviewState::Pushed
+        );
+        assert!(!is_suppressed_by_policy(&signals, &policy, now));
     }
 
     // LOCKED: regression for since-my-review review workflow (feat/since-my-review).

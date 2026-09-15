@@ -24,6 +24,10 @@ pub struct ReviewSignals {
     pub mentioned_at: Option<DateTime<Utc>>,
     /// Latest review request targeting the authenticated user
     pub review_requested_at: Option<DateTime<Utc>>,
+    /// A commit event appeared after the user's last review/comment in the
+    /// timeline stream, even if its committer date is older (old local
+    /// commits pushed late keep their original dates)
+    pub commit_after_my_activity: bool,
 }
 
 /// What happened since the user's last activity on a PR they reviewed.
@@ -71,7 +75,7 @@ pub fn review_state(
 
     let after_anchor = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t > anchor);
 
-    if after_anchor(signals.last_commit_at) {
+    if after_anchor(signals.last_commit_at) || signals.commit_after_my_activity {
         ReviewState::Pushed
     } else if after_anchor(signals.mentioned_at) {
         ReviewState::Mentioned
@@ -107,6 +111,7 @@ mod tests {
             last_commit_at: Some(days_ago(now, 1)),
             mentioned_at: Some(days_ago(now, 1)),
             review_requested_at: Some(days_ago(now, 1)),
+            commit_after_my_activity: true,
         };
         assert_eq!(
             review_state(&signals, now, valve()),
@@ -150,6 +155,20 @@ mod tests {
             review_state(&signals, now, valve()),
             ReviewState::AwaitingAuthor
         );
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // A commit with an old committer date pushed after my review must wake the PR.
+    #[test]
+    fn late_push_with_old_commit_date_is_pushed() {
+        let now = Utc::now();
+        let signals = ReviewSignals {
+            my_last_review_at: Some(days_ago(now, 1)),
+            last_commit_at: Some(days_ago(now, 3)),
+            commit_after_my_activity: true,
+            ..Default::default()
+        };
+        assert_eq!(review_state(&signals, now, valve()), ReviewState::Pushed);
     }
 
     #[test]

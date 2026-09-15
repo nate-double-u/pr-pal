@@ -275,6 +275,7 @@ struct TimelineSignals {
     mentioned_at: Option<chrono::DateTime<chrono::Utc>>,
     review_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     my_last_comment_at: Option<chrono::DateTime<chrono::Utc>>,
+    commit_after_my_activity: bool,
 }
 
 /// Extract review-cycle signals from raw timeline events.
@@ -286,6 +287,13 @@ struct TimelineSignals {
 /// - `mentioned` where actor is the user -> mentioned_at
 /// - `review_requested` where requested_reviewer is the user -> review_requested_at
 /// - `commented` where actor is the user -> my_last_comment_at
+/// - `reviewed` where user is the user -> stream-order activity marker
+///
+/// Commit committer dates are commit metadata: old local commits pushed after
+/// a review keep their old dates. The timeline stream is ordered by when
+/// events reached GitHub, so a commit event *appearing after* the user's last
+/// `reviewed`/`commented` event sets `commit_after_my_activity` regardless of
+/// its date.
 fn parse_timeline_events(
     events: &[serde_json::Value],
     auth_username: Option<&str>,
@@ -312,19 +320,23 @@ fn parse_timeline_events(
     }
 
     let mut signals = TimelineSignals::default();
-    for event in events {
+    let mut last_commit_idx: Option<usize> = None;
+    let mut last_my_activity_idx: Option<usize> = None;
+    for (idx, event) in events.iter().enumerate() {
         match event["event"].as_str() {
             Some("committed") => {
                 max_ts(
                     &mut signals.last_commit_at,
                     parse_date(&event["committer"]["date"]),
                 );
+                last_commit_idx = Some(idx);
             }
             Some("head_ref_force_pushed") => {
                 max_ts(
                     &mut signals.last_commit_at,
                     parse_date(&event["created_at"]),
                 );
+                last_commit_idx = Some(idx);
             }
             Some("mentioned") if login_matches(&event["actor"], auth_username) => {
                 max_ts(&mut signals.mentioned_at, parse_date(&event["created_at"]));
@@ -342,10 +354,18 @@ fn parse_timeline_events(
                     &mut signals.my_last_comment_at,
                     parse_date(&event["created_at"]),
                 );
+                last_my_activity_idx = Some(idx);
+            }
+            Some("reviewed") if login_matches(&event["user"], auth_username) => {
+                last_my_activity_idx = Some(idx);
             }
             _ => {}
         }
     }
+    signals.commit_after_my_activity = matches!(
+        (last_commit_idx, last_my_activity_idx),
+        (Some(commit), Some(activity)) if commit > activity
+    );
     signals
 }
 
@@ -388,6 +408,7 @@ async fn enrich_pr(
                         pr.signals.last_commit_at = timeline.last_commit_at;
                         pr.signals.mentioned_at = timeline.mentioned_at;
                         pr.signals.review_requested_at = timeline.review_requested_at;
+                        pr.signals.commit_after_my_activity = timeline.commit_after_my_activity;
                     }
                     Err(e) => {
                         buffered_eprintln!(
@@ -723,6 +744,89 @@ mod tests {
         ];
         let signals = parse_timeline_events(&events, Some("me"));
         assert_eq!(signals.last_commit_at, Some(ts("2026-09-05T10:00:00Z")));
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // Old local commits pushed after my review keep old committer dates; the
+    // timeline stream order (commit event after my reviewed event) must flag it.
+    #[test]
+    fn timeline_flags_commit_appearing_after_my_review() {
+        let events = vec![
+            json!({
+                "event": "reviewed",
+                "user": { "login": "me" },
+                "submitted_at": "2026-09-10T10:00:00Z"
+            }),
+            // Committed days before the review, pushed after it.
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert!(signals.commit_after_my_activity);
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // Commit before my review in the stream: ball stays with the author.
+    #[test]
+    fn timeline_does_not_flag_commit_before_my_review() {
+        let events = vec![
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+            json!({
+                "event": "reviewed",
+                "user": { "login": "me" },
+                "submitted_at": "2026-09-10T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert!(!signals.commit_after_my_activity);
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // My comment after a late push re-arms the cycle: flag clears.
+    #[test]
+    fn timeline_my_comment_after_late_push_clears_flag() {
+        let events = vec![
+            json!({
+                "event": "reviewed",
+                "user": { "login": "me" },
+                "submitted_at": "2026-09-10T10:00:00Z"
+            }),
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+            json!({
+                "event": "commented",
+                "actor": { "login": "me" },
+                "created_at": "2026-09-12T10:00:00Z"
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert!(!signals.commit_after_my_activity);
+    }
+
+    // LOCKED: regression for committer-date vs push-time (pr-pal#2 Copilot review).
+    // Someone else's review does not gate the stream-order flag.
+    #[test]
+    fn timeline_ignores_other_reviewers_for_stream_order() {
+        let events = vec![
+            json!({
+                "event": "reviewed",
+                "user": { "login": "someone-else" },
+                "submitted_at": "2026-09-10T10:00:00Z"
+            }),
+            json!({
+                "event": "committed",
+                "committer": { "name": "a", "email": "a@b.c", "date": "2026-09-01T10:00:00Z" }
+            }),
+        ];
+        let signals = parse_timeline_events(&events, Some("me"));
+        assert!(!signals.commit_after_my_activity);
     }
 
     // LOCKED: regression for since-my-review review workflow (feat/since-my-review).
