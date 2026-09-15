@@ -474,20 +474,19 @@ impl App {
 
     /// Whether a snoozed row would still be suppressed (awaiting author)
     /// given its current signals and the active policy. Refreshes update
-    /// signals while undo entries survive them, so undo re-evaluates rather
-    /// than trusting its snapshot. Without a resolvable policy or row, the
-    /// snapshot stands.
-    fn still_suppressed_now(&self, url: &str) -> bool {
+    /// signals while undo entries survive them, so callers re-evaluate
+    /// rather than trusting snapshots. `None` when the policy or row cannot
+    /// be resolved; callers fall back to their snapshot (or activate).
+    fn still_suppressed_now(&self, url: &str) -> Option<bool> {
         let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
             .ok()
-            .flatten();
-        let Some(policy) = policy else {
-            return true;
-        };
-        let Some((pr, _)) = self.snoozed_prs.iter().find(|(pr, _)| pr.url == url) else {
-            return true;
-        };
-        crate::snooze::is_suppressed_by_policy(&pr.signals, &policy, Utc::now())
+            .flatten()?;
+        let (pr, _) = self.snoozed_prs.iter().find(|(pr, _)| pr.url == url)?;
+        Some(crate::snooze::is_suppressed_by_policy(
+            &pr.signals,
+            &policy,
+            Utc::now(),
+        ))
     }
 
     /// Undo the last snooze or unsnooze action
@@ -517,10 +516,11 @@ impl App {
                     return;
                 }
 
-                if was_suppressed && self.still_suppressed_now(&url) {
-                    // The row was awaiting-author before the snooze and its
-                    // current signals still say so; restore that state
-                    // instead of activating it.
+                // Re-evaluate against current signals for every removed
+                // snooze; the snapshot only stands when policy or row can't
+                // be resolved. A row can become awaiting-author (or wake)
+                // while snoozed.
+                if self.still_suppressed_now(&url).unwrap_or(was_suppressed) {
                     self.suppressed_urls.insert(url.clone());
                     self.show_flash(format!("Undid snooze: {} (awaiting author)", title));
                 } else {
@@ -929,6 +929,45 @@ mod tests {
         );
         assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
         assert!(app.active_prs.is_empty());
+    }
+
+    // LOCKED: regression for undo trusting a stale non-suppressed snapshot (pr-pal#2 Copilot review).
+    // A row snoozed from Active can become awaiting-author during a refresh
+    // (e.g. my review arrived). Undoing the snooze must re-evaluate current
+    // signals for every removed snooze, not only ones snoozed while
+    // suppressed.
+    #[test]
+    fn undo_snooze_reevaluates_rows_snoozed_from_active() {
+        let url = "https://x/active-row";
+        let mut app = test_app("undo-reeval-active");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.active_prs = vec![scored(url, 1.0)];
+        app.current_view = View::Active;
+        app.table_state.select(Some(0));
+
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+        app.confirm_snooze_input();
+
+        // A refresh delivered new signals: I reviewed it, nothing since.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(1));
+
+        app.undo_last();
+
+        assert!(!app.snooze_state.is_snoozed(url));
+        assert!(
+            app.active_prs.is_empty(),
+            "awaiting-author row must not activate"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row stays in the Snoozed view");
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression marker must be added"
+        );
     }
 
     // LOCKED: regression for stale undo suppression snapshot (pr-pal#2 Copilot review).
