@@ -269,6 +269,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
             labels,
             previously_reviewed,
             draft,
+            since_my_review: None,
         }
     } else {
         ScoringConfig::default()
