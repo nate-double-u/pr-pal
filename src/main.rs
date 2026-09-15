@@ -70,6 +70,10 @@ struct Cli {
     #[arg(long, global = true)]
     clear_cache: bool,
 
+    /// Accepted for pr-bro compatibility; the fork has no version check
+    #[arg(long, global = true, hide = true)]
+    no_version_check: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -581,4 +585,18 @@ async fn main() {
     }
 
     std::process::exit(EXIT_SUCCESS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // LOCKED: compat guard for upstream pr-bro invocations (PR #6). The
+    // fork removed the version check, but scripts written for pr-bro may
+    // still pass --no-version-check; it must stay accepted as a no-op.
+    #[test]
+    fn no_version_check_flag_is_accepted() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "--no-version-check"]).is_ok());
+    }
 }
