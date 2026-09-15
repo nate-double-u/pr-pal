@@ -5,12 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0](https://github.com/nate-double-u/pr-pal/compare/v0.5.1...v1.0.0) - 2026-09-15
+
+First release of PR Pal, a fork of [PR Bro](https://github.com/toniperic/pr-bro).
+The rename follows [Inclusive Naming Initiative](https://inclusivenaming.org/) guidance.
 
 ### Added
 
 - `scoring.since_my_review`: score PRs by what happened after your last review (pushed / mentioned / review_requested / awaiting_author)
 - `suppress`: hide reviewed PRs awaiting the author; wake on push, mention, or re-request, with a `resurface_after` safety valve
+- Score tier colors: outliers red, above-average yellow, rest green, with log-scaled bar fill
+- Navigation keys: PgUp/PgDn, g/G, and vim-style H/M/L
+
+### Changed
+
+- Renamed crate, binary, config dir (`~/.config/pr-pal`), cache dir, and token env var (`PR_PAL_GH_TOKEN`); pr-bro configs parse unchanged, `--no-version-check` accepted as a no-op
+- CI runs against `main`; dependabot moved to weekly
+
+### Removed
+
+- Upstream version check and update banner
+- Release automation (release-plz, Homebrew publishing); releases are manual tags
 
 ## [0.5.1](https://github.com/toniperic/pr-bro/compare/v0.5.0...v0.5.1) - 2026-04-24
 
