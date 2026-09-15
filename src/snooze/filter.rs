@@ -1,7 +1,7 @@
 use super::types::SnoozeState;
 use crate::config::{SuppressConfig, WakeEvent};
 use crate::github::types::PullRequest;
-use crate::review_state::{review_state, ReviewState};
+use crate::review_state::{review_anchor, review_state, ReviewSignals, ReviewState};
 use chrono::{DateTime, Duration, Utc};
 
 /// Filter out snoozed PRs, returning only active (non-snoozed) PRs
@@ -72,9 +72,12 @@ pub fn partition_prs(
         let suppressed = policy.is_some_and(|policy| {
             match review_state(&pr.signals, now, policy.resurface_after) {
                 ReviewState::AwaitingAuthor => true,
-                ReviewState::Pushed => !policy.wake_on.contains(&WakeEvent::Push),
-                ReviewState::Mentioned => !policy.wake_on.contains(&WakeEvent::Mention),
-                ReviewState::ReviewRequested => !policy.wake_on.contains(&WakeEvent::ReviewRequest),
+                // A wake state reports only the highest-priority event; any
+                // configured event after the anchor must still wake the PR
+                // (a push must not mask a configured mention).
+                ReviewState::Pushed | ReviewState::Mentioned | ReviewState::ReviewRequested => {
+                    !any_configured_wake(&pr.signals, policy)
+                }
                 ReviewState::NotReviewed | ReviewState::Stalled => false,
             }
         });
@@ -86,6 +89,19 @@ pub fn partition_prs(
     }
 
     partitioned
+}
+
+/// True when any event in the policy's `wake_on` occurred after the anchor.
+fn any_configured_wake(signals: &ReviewSignals, policy: &SuppressPolicy) -> bool {
+    let Some(anchor) = review_anchor(signals) else {
+        return false;
+    };
+    let after = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t > anchor);
+    policy.wake_on.iter().any(|event| match event {
+        WakeEvent::Push => after(signals.last_commit_at),
+        WakeEvent::Mention => after(signals.mentioned_at),
+        WakeEvent::ReviewRequest => after(signals.review_requested_at),
+    })
 }
 
 #[cfg(test)]
@@ -275,6 +291,41 @@ mod tests {
             resurface_after: Some(Duration::days(21)),
         };
         let result = partition_prs(vec![pushed], &SnoozeState::new(), Some(&policy), Utc::now());
+        assert!(result.active.is_empty());
+        assert_eq!(result.suppressed.len(), 1);
+    }
+
+    // LOCKED: regression for wake_on subset masking (pr-pal#2 Copilot review).
+    // Any configured wake event must wake the PR, even when a higher-priority
+    // unconfigured event also occurred (a push must not mask a mention).
+    #[test]
+    fn partition_configured_wake_fires_despite_higher_priority_event() {
+        let mut pr = reviewed_pr(1, "https://github.com/o/r/pull/1", 5);
+        pr.signals.last_commit_at = Some(Utc::now() - Duration::days(2));
+        pr.signals.mentioned_at = Some(Utc::now() - Duration::days(1));
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::Mention],
+            resurface_after: Some(Duration::days(21)),
+        };
+        let result = partition_prs(vec![pr], &SnoozeState::new(), Some(&policy), Utc::now());
+        assert_eq!(result.active.len(), 1, "configured mention wake must fire");
+        assert!(result.suppressed.is_empty());
+    }
+
+    // LOCKED: regression for wake_on subset masking (pr-pal#2 Copilot review).
+    // Occurred-but-unconfigured events must still not wake the PR.
+    #[test]
+    fn partition_mixed_unconfigured_events_stay_suppressed() {
+        let mut pr = reviewed_pr(1, "https://github.com/o/r/pull/1", 5);
+        pr.signals.last_commit_at = Some(Utc::now() - Duration::days(2));
+        pr.signals.mentioned_at = Some(Utc::now() - Duration::days(1));
+
+        let policy = SuppressPolicy {
+            wake_on: vec![WakeEvent::ReviewRequest],
+            resurface_after: Some(Duration::days(21)),
+        };
+        let result = partition_prs(vec![pr], &SnoozeState::new(), Some(&policy), Utc::now());
         assert!(result.active.is_empty());
         assert_eq!(result.suppressed.len(), 1);
     }

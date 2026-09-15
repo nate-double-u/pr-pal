@@ -43,6 +43,16 @@ pub enum ReviewState {
     Stalled,
 }
 
+/// The review-cycle anchor: the user's most recent activity (review or
+/// comment), gated on at least one review existing.
+pub fn review_anchor(signals: &ReviewSignals) -> Option<DateTime<Utc>> {
+    let last_review = signals.my_last_review_at?;
+    Some(match signals.my_last_comment_at {
+        Some(comment) if comment > last_review => comment,
+        _ => last_review,
+    })
+}
+
 /// Compute the review-cycle state from signals.
 ///
 /// The anchor is the user's most recent activity (review or comment), gated
@@ -55,12 +65,8 @@ pub fn review_state(
     now: DateTime<Utc>,
     resurface_after: Option<Duration>,
 ) -> ReviewState {
-    let Some(last_review) = signals.my_last_review_at else {
+    let Some(anchor) = review_anchor(signals) else {
         return ReviewState::NotReviewed;
-    };
-    let anchor = match signals.my_last_comment_at {
-        Some(comment) if comment > last_review => comment,
-        _ => last_review,
     };
 
     let after_anchor = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t > anchor);
