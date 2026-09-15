@@ -84,6 +84,10 @@ pub enum UndoAction {
         url: String,
         title: String,
         until: Option<DateTime<Utc>>,
+        /// The row resolved to awaiting-author when unsnoozed, so it stayed
+        /// in the Snoozed view as suppressed; undo drops the marker instead
+        /// of moving rows.
+        became_suppressed: bool,
     },
     Resnooze {
         url: String,
@@ -458,18 +462,28 @@ impl App {
             return;
         }
 
+        // With the manual snooze gone, the row is governed by the policy
+        // again: if its current signals still resolve to awaiting-author it
+        // stays in the Snoozed view as suppressed rather than jumping to
+        // Active until the next refresh.
+        let became_suppressed = self.still_suppressed_now(&url).unwrap_or(false);
+
         // Push to undo stack
         self.push_undo(UndoAction::Unsnoozed {
             url: url.clone(),
             title: title.clone(),
             until,
+            became_suppressed,
         });
 
-        // Move PR from snoozed to active
-        self.move_pr_between_lists(&url, false);
-
-        // Show flash message
-        self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
+        if became_suppressed {
+            self.suppressed_urls.insert(url.clone());
+            self.show_flash(format!("Unsnoozed: {} (awaiting author; z to undo)", title));
+        } else {
+            // Move PR from snoozed to active
+            self.move_pr_between_lists(&url, false);
+            self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
+        }
     }
 
     /// Whether a snoozed row would still be suppressed (awaiting author)
@@ -529,7 +543,12 @@ impl App {
                     self.show_flash(format!("Undid snooze: {}", title));
                 }
             }
-            UndoAction::Unsnoozed { url, title, until } => {
+            UndoAction::Unsnoozed {
+                url,
+                title,
+                until,
+                became_suppressed,
+            } => {
                 // Undo an unsnooze: re-snooze the PR
                 self.snooze_state.snooze(url.clone(), until);
 
@@ -541,8 +560,14 @@ impl App {
                     return;
                 }
 
-                // Move PR back from active to snoozed
-                self.move_pr_between_lists(&url, true);
+                if became_suppressed {
+                    // The row never left the Snoozed view; drop the marker so
+                    // it shows as manually snoozed again.
+                    self.suppressed_urls.remove(&url);
+                } else {
+                    // Move PR back from active to snoozed
+                    self.move_pr_between_lists(&url, true);
+                }
 
                 self.show_flash(format!("Undid unsnooze: {}", title));
             }
@@ -928,6 +953,70 @@ mod tests {
             "suppression must be restored"
         );
         assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
+        assert!(app.active_prs.is_empty());
+    }
+
+    // LOCKED: regression for unsnooze bypassing suppression (pr-pal#2 Copilot review).
+    // Removing a manual snooze must re-evaluate the row: if its current
+    // signals still resolve to awaiting-author, it stays in the Snoozed view
+    // as suppressed instead of jumping to Active until the next refresh.
+    #[test]
+    fn unsnooze_keeps_awaiting_author_row_suppressed() {
+        let url = "https://x/manual-snoozed";
+        let mut app = test_app("unsnooze-reeval");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        // Reviewed 5 days ago, nothing since: policy says awaiting author.
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+        app.snooze_state.snooze(url.to_string(), None);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.unsnooze_selected();
+
+        assert!(!app.snooze_state.is_snoozed(url), "manual snooze removed");
+        assert!(
+            app.active_prs.is_empty(),
+            "awaiting-author row must not activate"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row stays in the Snoozed view");
+        assert!(
+            app.suppressed_urls.contains(url),
+            "suppression marker must be added"
+        );
+    }
+
+    // LOCKED: regression for unsnooze bypassing suppression (pr-pal#2 Copilot review).
+    // Undoing that unsnooze restores the manual snooze without duplicating
+    // the row or leaving the suppression marker behind.
+    #[test]
+    fn undo_unsnooze_of_awaiting_author_row_restores_manual_snooze() {
+        let url = "https://x/manual-snoozed-undo";
+        let mut app = test_app("unsnooze-reeval-undo");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.snoozed_prs[0].0.signals.my_last_review_at = Some(Utc::now() - Duration::days(5));
+        app.snooze_state.snooze(url.to_string(), None);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.unsnooze_selected();
+        app.undo_last();
+
+        assert!(app.snooze_state.is_snoozed(url), "manual snooze restored");
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "suppression marker must be removed; the manual snooze wins again"
+        );
+        assert_eq!(app.snoozed_prs.len(), 1, "row must not duplicate");
         assert!(app.active_prs.is_empty());
     }
 
