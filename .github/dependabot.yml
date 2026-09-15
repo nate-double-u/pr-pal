@@ -3,13 +3,17 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    assignees:
+      - "nate-double-u"
     commit-message:
       prefix: "chore(deps)"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    assignees:
+      - "nate-double-u"
     commit-message:
       prefix: "chore(deps)"
