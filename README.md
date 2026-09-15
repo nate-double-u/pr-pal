@@ -1,6 +1,6 @@
 # PR Pal
 
-PR Pal is a fork of [PR Bro](https://github.com/toniperic/pr-bro) by [@toniperic](https://github.com/toniperic). The binary, crate, and config paths keep the `pr-bro` name for upstream compatibility.
+PR Pal is a fork of [PR Bro](https://github.com/toniperic/pr-bro) by [@toniperic](https://github.com/toniperic). The `PR_BRO_GH_TOKEN` environment variable keeps its upstream name.
 
 [![CI](https://github.com/nate-double-u/pr-pal/actions/workflows/ci.yml/badge.svg)](https://github.com/nate-double-u/pr-pal/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

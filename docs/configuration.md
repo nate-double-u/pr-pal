@@ -2,7 +2,7 @@
 
 This document covers the full configuration options for PR Pal. For a quick-start guide, see the [README](../README.md).
 
-Configuration file location: `~/.config/pr-bro/config.yaml`
+Configuration file location: `~/.config/pr-pal/config.yaml`
 
 ## Full Configuration Example
 

@@ -42,7 +42,7 @@ enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "pr-bro")]
+#[command(name = "pr-pal")]
 #[command(about = "GitHub PR review prioritization CLI", long_about = None)]
 #[command(version)]
 struct Cli {
@@ -50,7 +50,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Path to config file (defaults to ~/.config/pr-bro/config.yaml)
+    /// Path to config file (defaults to ~/.config/pr-pal/config.yaml)
     #[arg(short, long, global = true)]
     config: Option<String>,
 
@@ -94,9 +94,9 @@ async fn main() {
 
     // Handle --clear-cache flag (early exit before credential setup)
     if cli.clear_cache {
-        let cache_path = pr_bro::github::get_cache_path();
+        let cache_path = pr_pal::github::get_cache_path();
         println!("Clearing cache at: {}", cache_path.display());
-        match pr_bro::github::clear_cache() {
+        match pr_pal::github::clear_cache() {
             Ok(()) => {
                 println!("Cache cleared.");
                 std::process::exit(EXIT_SUCCESS);
@@ -109,7 +109,7 @@ async fn main() {
     }
 
     // Evict stale cache entries (older than 7 days)
-    let evicted = pr_bro::github::evict_stale_entries();
+    let evicted = pr_pal::github::evict_stale_entries();
     if cli.verbose && evicted > 0 {
         eprintln!(
             "Evicted {} stale cache entries (older than 7 days)",
@@ -120,7 +120,7 @@ async fn main() {
     // Handle init subcommand (before config load)
     if matches!(command, Commands::Init) {
         let config_path = config_path_str.map(PathBuf::from);
-        match pr_bro::config::run_init_wizard(config_path) {
+        match pr_pal::config::run_init_wizard(config_path) {
             Ok(()) => std::process::exit(EXIT_SUCCESS),
             Err(e) => {
                 eprintln!("Init failed: {:#}", e);
@@ -133,7 +133,7 @@ async fn main() {
     let config_path = config_path_str.as_ref().map(PathBuf::from);
     let resolved_path = config_path
         .clone()
-        .unwrap_or_else(pr_bro::config::get_config_path);
+        .unwrap_or_else(pr_pal::config::get_config_path);
     let config = if !resolved_path.exists() {
         // Config missing -- offer wizard if interactive terminal
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -144,11 +144,11 @@ async fn main() {
             let _ = std::io::stdin().lock().read_line(&mut answer);
             let answer = answer.trim().to_lowercase();
             if answer.is_empty() || answer == "y" || answer == "yes" {
-                match pr_bro::config::run_init_wizard(config_path) {
+                match pr_pal::config::run_init_wizard(config_path) {
                     Ok(()) => {
                         // Re-load the config that was just written
                         let reload_path = config_path_str.map(PathBuf::from);
-                        match pr_bro::config::load_config(reload_path) {
+                        match pr_pal::config::load_config(reload_path) {
                             Ok(c) => c,
                             Err(e) => {
                                 eprintln!("Config error after init: {:#}", e);
@@ -162,19 +162,19 @@ async fn main() {
                     }
                 }
             } else {
-                eprintln!("No config file found. Run `pr-bro init` to create one.");
+                eprintln!("No config file found. Run `pr-pal init` to create one.");
                 std::process::exit(EXIT_CONFIG);
             }
         } else {
             // Non-interactive: just error out
             eprintln!(
-                "Config file not found at {}. Run `pr-bro init` to create one.",
+                "Config file not found at {}. Run `pr-pal init` to create one.",
                 resolved_path.display()
             );
             std::process::exit(EXIT_CONFIG);
         }
     } else {
-        match pr_bro::config::load_config(config_path) {
+        match pr_pal::config::load_config(config_path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Config error: {:#}", e);
@@ -197,7 +197,7 @@ async fn main() {
 
     // Validate global scoring config
     let global_scoring = config.scoring.clone().unwrap_or_default();
-    if let Err(errors) = pr_bro::scoring::validate_scoring(&global_scoring) {
+    if let Err(errors) = pr_pal::scoring::validate_scoring(&global_scoring) {
         eprintln!("Scoring config errors:");
         for error in errors {
             eprintln!("  - {}", error);
@@ -207,7 +207,7 @@ async fn main() {
     // Validate per-query scoring configs
     for (i, query) in config.queries.iter().enumerate() {
         if let Some(ref scoring) = query.scoring {
-            if let Err(errors) = pr_bro::scoring::validate_scoring(scoring) {
+            if let Err(errors) = pr_pal::scoring::validate_scoring(scoring) {
                 eprintln!(
                     "Scoring config errors in query '{}' (index {}):",
                     query.name.as_deref().unwrap_or("unnamed"),
@@ -222,31 +222,31 @@ async fn main() {
     }
 
     // Validate suppress config (resurface_after duration syntax)
-    if let Err(e) = pr_bro::snooze::suppress_policy(config.suppress.as_ref()) {
+    if let Err(e) = pr_pal::snooze::suppress_policy(config.suppress.as_ref()) {
         eprintln!("Suppress config error:");
         eprintln!("  - {}", e);
         std::process::exit(EXIT_CONFIG);
     }
 
     // Load snooze state (before credential setup - no network required)
-    let snooze_path = pr_bro::snooze::get_snooze_path();
-    let mut snooze_state = match pr_bro::snooze::load_snooze_state(&snooze_path) {
+    let snooze_path = pr_pal::snooze::get_snooze_path();
+    let mut snooze_state = match pr_pal::snooze::load_snooze_state(&snooze_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Warning: Could not load snooze state: {}", e);
-            pr_bro::snooze::SnoozeState::new()
+            pr_pal::snooze::SnoozeState::new()
         }
     };
     // Clean expired snoozes on load
     snooze_state.clean_expired();
 
     // Resolve theme from config (before TUI mode, as terminal-light reads stdin)
-    let theme = pr_bro::tui::resolve_theme(&config.theme);
+    let theme = pr_pal::tui::resolve_theme(&config.theme);
 
     // Check if any queries are configured
     if config.queries.is_empty() {
         eprintln!("No queries configured in config file.");
-        eprintln!("Add queries to ~/.config/pr-bro/config.yaml:");
+        eprintln!("Add queries to ~/.config/pr-pal/config.yaml:");
         eprintln!("  queries:");
         eprintln!("    - name: my-reviews");
         eprintln!("      query: \"is:pr review-requested:@me\"");
@@ -254,7 +254,7 @@ async fn main() {
     }
 
     // Setup credentials (prompts for token on first run)
-    let token = match pr_bro::credentials::setup_token_if_missing() {
+    let token = match pr_pal::credentials::setup_token_if_missing() {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Credential error: {}", e);
@@ -263,10 +263,10 @@ async fn main() {
     };
 
     if cli.verbose {
-        if pr_bro::credentials::get_token_from_env().is_some() {
+        if pr_pal::credentials::get_token_from_env().is_some() {
             eprintln!(
                 "Token retrieved from {} env var",
-                pr_bro::credentials::ENV_TOKEN_VAR
+                pr_pal::credentials::ENV_TOKEN_VAR
             );
         } else {
             eprintln!("Token provided via prompt");
@@ -274,7 +274,7 @@ async fn main() {
     }
 
     // Create cache config
-    let cache_config = pr_bro::github::CacheConfig {
+    let cache_config = pr_pal::github::CacheConfig {
         enabled: !cli.no_cache,
     };
 
@@ -287,12 +287,12 @@ async fn main() {
         eprintln!(
             "Cache: {} ({})",
             status,
-            pr_bro::github::get_cache_path().display()
+            pr_pal::github::get_cache_path().display()
         );
     }
 
     // Create GitHub client and get cache handle
-    let (client, cache_handle) = match pr_bro::github::create_client(&token, &cache_config) {
+    let (client, cache_handle) = match pr_pal::github::create_client(&token, &cache_config) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Failed to create GitHub client: {}", e);
@@ -333,7 +333,7 @@ async fn main() {
         }
 
         // Create App in loading state (empty PR lists)
-        let app = pr_bro::tui::App::new_loading(
+        let app = pr_pal::tui::App::new_loading(
             snooze_state,
             snooze_path,
             config,
@@ -346,7 +346,7 @@ async fn main() {
         );
 
         // Launch TUI immediately - it will trigger initial fetch in background
-        if let Err(e) = pr_bro::tui::run_tui(app, client).await {
+        if let Err(e) = pr_pal::tui::run_tui(app, client).await {
             eprintln!("TUI error: {}", e);
             std::process::exit(EXIT_NETWORK);
         }
@@ -358,7 +358,7 @@ async fn main() {
     let mut current_client = client;
     let mut current_auth_username = auth_username;
     let fetched = loop {
-        match pr_bro::fetch::fetch_and_score_prs(
+        match pr_pal::fetch::fetch_and_score_prs(
             &current_client,
             &config,
             &snooze_state,
@@ -371,11 +371,11 @@ async fn main() {
             Ok(result) => break result,
             Err(e) => {
                 // Check if it's an auth error
-                if e.downcast_ref::<pr_bro::fetch::AuthError>().is_some() {
+                if e.downcast_ref::<pr_pal::fetch::AuthError>().is_some() {
                     eprintln!("Authentication failed: {}", e);
 
                     // Re-prompt for token
-                    let new_token = match pr_bro::credentials::reprompt_for_token() {
+                    let new_token = match pr_pal::credentials::reprompt_for_token() {
                         Ok(t) => t,
                         Err(e) => {
                             eprintln!("Failed to get new token: {}", e);
@@ -384,7 +384,7 @@ async fn main() {
                     };
 
                     // Recreate client with new token
-                    current_client = match pr_bro::github::create_client(&new_token, &cache_config)
+                    current_client = match pr_pal::github::create_client(&new_token, &cache_config)
                     {
                         Ok((c, _handle)) => c,
                         Err(e) => {
@@ -434,9 +434,9 @@ async fn main() {
     match command {
         Commands::List { show_snoozed: _ } => {
             // Build ScoredPr references for formatter
-            let scored_refs: Vec<pr_bro::output::ScoredPr> = scored_prs
+            let scored_refs: Vec<pr_pal::output::ScoredPr> = scored_prs
                 .iter()
-                .map(|(pr, result)| pr_bro::output::ScoredPr {
+                .map(|(pr, result)| pr_pal::output::ScoredPr {
                     pr,
                     score: result.score,
                     incomplete: result.incomplete,
@@ -444,11 +444,11 @@ async fn main() {
                 .collect();
 
             // Output results
-            let use_colors = pr_bro::output::should_use_colors();
+            let use_colors = pr_pal::output::should_use_colors();
 
             if cli.format == "tsv" {
                 // TSV mode: machine-readable tab-separated output
-                let output = pr_bro::output::format_tsv(&scored_refs);
+                let output = pr_pal::output::format_tsv(&scored_refs);
                 if !output.is_empty() {
                     println!("{}", output);
                 }
@@ -457,17 +457,17 @@ async fn main() {
                 for scored in &scored_refs {
                     println!(
                         "{}",
-                        pr_bro::output::format_pr_detail(scored.pr, use_colors)
+                        pr_pal::output::format_pr_detail(scored.pr, use_colors)
                     );
                     println!(
                         "  Score: {}",
-                        pr_bro::output::format_score(scored.score, scored.incomplete)
+                        pr_pal::output::format_score(scored.score, scored.incomplete)
                     );
                     println!();
                 }
             } else {
                 // Normal mode: scored table
-                let output = pr_bro::output::format_scored_table(&scored_refs, use_colors);
+                let output = pr_pal::output::format_scored_table(&scored_refs, use_colors);
                 println!("{}", output);
             }
 
@@ -501,7 +501,7 @@ async fn main() {
             let (pr, _result) = &scored_prs[index - 1];
 
             // Open in browser
-            if let Err(e) = pr_bro::browser::open_url(&pr.url) {
+            if let Err(e) = pr_pal::browser::open_url(&pr.url) {
                 eprintln!("Failed to open browser: {}", e);
                 std::process::exit(EXIT_NETWORK);
             }
@@ -545,7 +545,7 @@ async fn main() {
             };
 
             snooze_state.snooze(pr.url.clone(), snooze_until);
-            if let Err(e) = pr_bro::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+            if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
                 eprintln!("Failed to save snooze state: {}", e);
                 std::process::exit(EXIT_CONFIG);
             }
@@ -573,7 +573,7 @@ async fn main() {
             let (pr, _) = &scored_prs[index - 1];
             let removed = snooze_state.unsnooze(&pr.url);
             if removed {
-                if let Err(e) = pr_bro::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+                if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
                     eprintln!("Failed to save snooze state: {}", e);
                     std::process::exit(EXIT_CONFIG);
                 }

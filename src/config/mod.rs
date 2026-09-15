@@ -8,13 +8,13 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
-/// Get the config directory path (~/.config/pr-bro/)
+/// Get the config directory path (~/.config/pr-pal/)
 pub fn get_config_dir() -> PathBuf {
     let home = dirs::home_dir().expect("Could not determine home directory");
-    home.join(".config").join("pr-bro")
+    home.join(".config").join("pr-pal")
 }
 
-/// Get the default config file path (~/.config/pr-bro/config.yaml)
+/// Get the default config file path (~/.config/pr-pal/config.yaml)
 pub fn get_config_path() -> PathBuf {
     get_config_dir().join("config.yaml")
 }
@@ -37,7 +37,7 @@ pub fn ensure_config_dir() -> Result<()> {
 ///
 /// # Arguments
 ///
-/// * `path` - Optional path to config file. If None, uses default path (~/.config/pr-bro/config.yaml)
+/// * `path` - Optional path to config file. If None, uses default path (~/.config/pr-pal/config.yaml)
 ///
 /// # Errors
 ///
@@ -50,7 +50,7 @@ pub fn load_config(path: Option<PathBuf>) -> Result<Config> {
 
     if !config_path.exists() {
         anyhow::bail!(
-            "Config file not found at {}. Create ~/.config/pr-bro/config.yaml",
+            "Config file not found at {}. Create ~/.config/pr-pal/config.yaml",
             config_path.display()
         );
     }
@@ -62,4 +62,14 @@ pub fn load_config(path: Option<PathBuf>) -> Result<Config> {
         .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", config_path.display(), e))?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    // Merge guard: the fork's config lives under pr-pal, not upstream's
+    // pr-bro. An upstream merge must not silently move it back.
+    #[test]
+    fn config_dir_is_pr_pal() {
+        assert!(super::get_config_dir().ends_with(".config/pr-pal"));
+    }
 }

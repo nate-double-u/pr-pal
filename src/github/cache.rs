@@ -11,13 +11,13 @@ pub struct CacheConfig {
     pub enabled: bool, // false when --no-cache
 }
 
-/// Get the platform-appropriate cache directory for pr-bro
+/// Get the platform-appropriate cache directory for pr-pal
 pub fn get_cache_path() -> PathBuf {
     dirs::cache_dir()
-        .map(|p| p.join("pr-bro/http-cache"))
+        .map(|p| p.join("pr-pal/http-cache"))
         .unwrap_or_else(|| {
             PathBuf::from(format!(
-                "{}/.cache/pr-bro/http-cache",
+                "{}/.cache/pr-pal/http-cache",
                 std::env::var("HOME").unwrap_or_default()
             ))
         })

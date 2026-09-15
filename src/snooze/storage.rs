@@ -4,7 +4,7 @@ use atomic_write_file::AtomicWriteFile;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// Get the default snooze state file path (~/.config/pr-bro/snooze.json)
+/// Get the default snooze state file path (~/.config/pr-pal/snooze.json)
 pub fn get_snooze_path() -> PathBuf {
     crate::config::get_config_dir().join("snooze.json")
 }
