@@ -27,12 +27,20 @@ pub async fn search_prs(client: &Octocrab, query: &str) -> Result<Vec<PullReques
         match client
             .search()
             .issues_and_pull_requests(&query)
+            .per_page(100u8)
             .send()
             .await
         {
-            Ok(results) => {
-                let prs: Vec<PullRequest> = results
-                    .items
+            Ok(first_page) => {
+                // Follow pagination so multi-page result sets are fully
+                // collected. Without this, GitHub's default page size caps
+                // each query at its first page (see the pagination regression
+                // test below).
+                let items = match client.all_pages(first_page).await {
+                    Ok(items) => items,
+                    Err(e) => return Err(anyhow!("Failed to paginate search results: {}", e)),
+                };
+                let prs: Vec<PullRequest> = items
                     .into_iter()
                     .filter(|issue| issue.pull_request.is_some()) // Only PRs, not issues
                     .map(|issue| {
@@ -370,4 +378,142 @@ pub async fn search_and_enrich_prs(
     enriched_prs.extend(prs_iter);
 
     Ok(enriched_prs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn author_json(login: &str) -> serde_json::Value {
+        let base = format!("https://api.github.com/users/{login}");
+        json!({
+            "login": login,
+            "id": 1,
+            "node_id": "U1",
+            "avatar_url": "https://avatars.githubusercontent.com/u/1",
+            "gravatar_id": "",
+            "url": base,
+            "html_url": format!("https://github.com/{login}"),
+            "followers_url": format!("{base}/followers"),
+            "following_url": format!("{base}/following{{/other_user}}"),
+            "gists_url": format!("{base}/gists{{/gist_id}}"),
+            "starred_url": format!("{base}/starred{{/owner}}{{/repo}}"),
+            "subscriptions_url": format!("{base}/subscriptions"),
+            "organizations_url": format!("{base}/orgs"),
+            "repos_url": format!("{base}/repos"),
+            "events_url": format!("{base}/events{{/privacy}}"),
+            "received_events_url": format!("{base}/received_events"),
+            "type": "User",
+            "site_admin": false,
+            "name": null,
+            "patch_url": null,
+            "email": null
+        })
+    }
+
+    /// A minimal but fully deserializable octocrab `Issue` JSON representing a PR.
+    fn pr_issue_json(number: u64, owner: &str, repo: &str) -> serde_json::Value {
+        let html_url = format!("https://github.com/{owner}/{repo}/pull/{number}");
+        let api = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
+        json!({
+            "id": number,
+            "node_id": format!("I{number}"),
+            "url": api,
+            "repository_url": format!("https://api.github.com/repos/{owner}/{repo}"),
+            "labels_url": format!("{api}/labels{{/name}}"),
+            "comments_url": format!("{api}/comments"),
+            "events_url": format!("{api}/events"),
+            "html_url": html_url,
+            "number": number,
+            "state": "open",
+            "state_reason": null,
+            "title": format!("PR {number}"),
+            "body": null,
+            "user": author_json(owner),
+            "labels": [],
+            "assignee": null,
+            "assignees": [],
+            "author_association": null,
+            "milestone": null,
+            "locked": false,
+            "active_lock_reason": null,
+            "comments": 0,
+            "pull_request": {
+                "url": api,
+                "html_url": html_url,
+                "diff_url": format!("{html_url}.diff"),
+                "patch_url": format!("{html_url}.patch")
+            },
+            "closed_at": null,
+            "closed_by": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    fn search_body(items: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "total_count": items.len(),
+            "incomplete_results": false,
+            "items": items
+        })
+    }
+
+    // LOCKED: regression for search pagination (30-result cap; upstream toniperic/pr-bro).
+    // search_prs must follow the Link header and return results beyond the first page.
+    #[tokio::test]
+    async fn search_prs_returns_results_from_all_pages() {
+        let server = MockServer::start().await;
+
+        // Page 2: one more PR, no further pages.
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("page", "2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(search_body(vec![pr_issue_json(3, "o", "r")])),
+            )
+            .mount(&server)
+            .await;
+
+        // Page 1: two PRs plus a Link header advertising page 2.
+        let next_link = format!(
+            "<{}/search/issues?q=x&per_page=100&page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param_is_missing("page"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next_link.as_str())
+                    .set_body_json(search_body(vec![
+                        pr_issue_json(1, "o", "r"),
+                        pr_issue_json(2, "o", "r"),
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let prs = search_prs(&client, "review-requested:@me is:pr")
+            .await
+            .expect("search_prs should succeed");
+
+        // First page alone has 2; only true pagination yields all 3.
+        assert_eq!(
+            prs.len(),
+            3,
+            "expected PRs from all pages, got {}",
+            prs.len()
+        );
+    }
 }
