@@ -286,6 +286,8 @@ struct TimelineSignals {
 ///   carry old committer dates, so the force-push event marks the update)
 /// - `mentioned` where actor is the user -> mentioned_at
 /// - `review_requested` where requested_reviewer is the user -> review_requested_at
+/// - `review_request_removed` where requested_reviewer is the user -> clears
+///   review_requested_at (a later re-request sets it again)
 /// - `commented` where actor is the user -> my_last_comment_at
 /// - `reviewed` where user is the user -> stream-order activity marker
 ///
@@ -348,6 +350,11 @@ fn parse_timeline_events(
                     &mut signals.review_requested_at,
                     parse_date(&event["created_at"]),
                 );
+            }
+            Some("review_request_removed")
+                if login_matches(&event["requested_reviewer"], auth_username) =>
+            {
+                signals.review_requested_at = None;
             }
             Some("commented") if login_matches(&event["actor"], auth_username) => {
                 max_ts(
@@ -895,6 +902,64 @@ mod tests {
         assert_eq!(
             signals.review_requested_at,
             Some(ts("2026-09-05T10:00:00Z"))
+        );
+    }
+
+    // LOCKED: regression for stale review request after removal (pr-pal#2 Copilot review).
+    // A later review_request_removed for me clears the request signal; only my
+    // removals count; a subsequent re-request sets it again.
+    #[test]
+    fn timeline_clears_review_request_on_removal_and_honors_re_request() {
+        let request = |at: &str| {
+            json!({
+                "event": "review_requested",
+                "requested_reviewer": { "login": "me" },
+                "created_at": at
+            })
+        };
+        let removal = |who: &str, at: &str| {
+            json!({
+                "event": "review_request_removed",
+                "requested_reviewer": { "login": who },
+                "created_at": at
+            })
+        };
+
+        // Request then removal: signal cleared.
+        let signals = parse_timeline_events(
+            &[
+                request("2026-09-05T10:00:00Z"),
+                removal("me", "2026-09-06T10:00:00Z"),
+            ],
+            Some("me"),
+        );
+        assert_eq!(signals.review_requested_at, None);
+
+        // Someone else's removal leaves my request intact.
+        let signals = parse_timeline_events(
+            &[
+                request("2026-09-05T10:00:00Z"),
+                removal("someone-else", "2026-09-06T10:00:00Z"),
+            ],
+            Some("me"),
+        );
+        assert_eq!(
+            signals.review_requested_at,
+            Some(ts("2026-09-05T10:00:00Z"))
+        );
+
+        // Request, removal, re-request: latest request wins.
+        let signals = parse_timeline_events(
+            &[
+                request("2026-09-05T10:00:00Z"),
+                removal("me", "2026-09-06T10:00:00Z"),
+                request("2026-09-07T10:00:00Z"),
+            ],
+            Some("me"),
+        );
+        assert_eq!(
+            signals.review_requested_at,
+            Some(ts("2026-09-07T10:00:00Z"))
         );
     }
 
