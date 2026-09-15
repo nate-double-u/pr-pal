@@ -4,6 +4,8 @@ This document covers the full configuration options for PR Pal. For a quick-star
 
 Configuration file location: `~/.config/pr-pal/config.yaml`
 
+Upgrading from PR Bro? Move your existing configuration once: `mv ~/.config/pr-bro ~/.config/pr-pal`
+
 ## Full Configuration Example
 
 ```yaml

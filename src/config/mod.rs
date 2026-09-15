@@ -66,8 +66,9 @@ pub fn load_config(path: Option<PathBuf>) -> Result<Config> {
 
 #[cfg(test)]
 mod tests {
-    // Merge guard: the fork's config lives under pr-pal, not upstream's
-    // pr-bro. An upstream merge must not silently move it back.
+    // LOCKED: merge guard for the pr-pal config path (PR #6). The fork's
+    // config lives under pr-pal, not upstream's pr-bro. An upstream merge
+    // must not silently move it back.
     #[test]
     fn config_dir_is_pr_pal() {
         assert!(super::get_config_dir().ends_with(".config/pr-pal"));

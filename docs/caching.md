@@ -5,9 +5,9 @@ PR Pal uses ETag-based HTTP caching to reduce GitHub API rate limit consumption.
 ## Cache Location
 
 Platform-specific cache directory:
-- **macOS**: `~/Library/Caches/pr-pal`
-- **Linux**: `~/.cache/pr-pal`
-- **Windows**: `%LOCALAPPDATA%\pr-pal\cache`
+- **macOS**: `~/Library/Caches/pr-pal/http-cache`
+- **Linux**: `~/.cache/pr-pal/http-cache`
+- **Windows**: `%LOCALAPPDATA%\pr-pal\http-cache`
 
 ## Cache Behavior
 
