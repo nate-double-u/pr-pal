@@ -334,8 +334,10 @@ impl App {
             }
         };
 
-        // Capture old snooze_until before overwriting (needed for undo on re-snooze)
-        let was_manually_snoozed = self.snooze_state.snoozed_entries().contains_key(&url);
+        // Capture old snooze_until before overwriting (needed for undo on
+        // re-snooze). is_snoozed, not contains_key: a stale expired entry is
+        // not an active manual snooze.
+        let was_manually_snoozed = self.snooze_state.is_snoozed(&url);
         let old_until = self
             .snooze_state
             .snoozed_entries()
@@ -423,11 +425,10 @@ impl App {
             None => return,
         };
 
-        // Suppressed rows aren't manually snoozed; there is nothing to undo.
-        // They resurface on author updates, mentions, or re-requests.
-        if self.suppressed_urls.contains(&url)
-            && !self.snooze_state.snoozed_entries().contains_key(&url)
-        {
+        // Suppressed rows aren't manually snoozed (an expired entry doesn't
+        // count); there is nothing to undo. They resurface on author updates,
+        // mentions, or re-requests.
+        if self.suppressed_urls.contains(&url) && !self.snooze_state.is_snoozed(&url) {
             self.show_flash("Awaiting author since your review; updates resurface it".to_string());
             return;
         }
@@ -734,6 +735,88 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    fn test_app(name: &str) -> App {
+        App::new(
+            Vec::new(),
+            Vec::new(),
+            SnoozeState::new(),
+            std::env::temp_dir().join(format!(
+                "pr-bro-app-test-{}-{}.json",
+                std::process::id(),
+                name
+            )),
+            Config {
+                scoring: None,
+                queries: vec![],
+                auto_refresh_interval: 300,
+                theme: "dark".to_string(),
+                suppress: None,
+            },
+            CacheConfig { enabled: false },
+            None,
+            false,
+            Some("me".to_string()),
+            true,
+            Theme::Dark,
+        )
+    }
+
+    /// Seed an app with one suppressed (awaiting author) row in the Snoozed
+    /// view, selected.
+    fn app_with_suppressed_row(name: &str, url: &str) -> App {
+        let mut app = test_app(name);
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.suppressed_urls.insert(url.to_string());
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+        app
+    }
+
+    // LOCKED: regression for expired-snooze guards (pr-pal#2 Copilot review).
+    // An expired manual snooze entry must not let `u` activate a row the
+    // partition still classifies as suppressed (awaiting author).
+    #[test]
+    fn unsnooze_guard_holds_when_stale_expired_entry_exists() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("unsnooze-guard", url);
+        // Stale entry: expired an hour ago, not yet cleaned up.
+        app.snooze_state
+            .snooze(url.to_string(), Some(Utc::now() - Duration::hours(1)));
+
+        app.unsnooze_selected();
+
+        assert_eq!(app.snoozed_prs.len(), 1, "row must stay in Snoozed view");
+        assert!(
+            app.active_prs.is_empty(),
+            "suppressed row must not activate"
+        );
+        assert!(app.undo_stack.is_empty());
+    }
+
+    // LOCKED: regression for expired-snooze guards (pr-pal#2 Copilot review).
+    // Snoozing a suppressed row that has a stale expired entry is a fresh
+    // manual snooze: the suppression marker must clear, not the re-snooze path.
+    #[test]
+    fn snoozing_suppressed_row_with_stale_entry_clears_marker() {
+        let url = "https://x/suppressed";
+        let mut app = app_with_suppressed_row("stale-resnooze", url);
+        app.snooze_state
+            .snooze(url.to_string(), Some(Utc::now() - Duration::hours(1)));
+        app.input_mode = InputMode::SnoozeInput;
+        app.snooze_input = "1d".to_string();
+
+        app.confirm_snooze_input();
+
+        assert!(
+            !app.suppressed_urls.contains(url),
+            "marker must clear on fresh snooze"
+        );
+        assert!(matches!(
+            app.undo_stack.front(),
+            Some(UndoAction::Snoozed { .. })
+        ));
     }
 
     #[test]
