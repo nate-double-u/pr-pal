@@ -661,12 +661,17 @@ impl App {
         // Suppressed PRs share the Snoozed view, tagged "awaiting author"
         let (snoozed_merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
 
-        // Wake-reason tags for Active rows, derived from the same effective
-        // policy that partitioning uses
+        // Wake-reason tags derived from the same effective policy that
+        // partitioning uses. Snoozed rows are included: a row that wakes
+        // while manually snoozed keeps its tag when it later moves to
+        // Active in-memory (unsnooze/undo) before the next refresh.
         let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
             .ok()
             .flatten();
-        self.review_states = compute_review_states(&active, policy.as_ref(), Utc::now());
+        let now = Utc::now();
+        let mut review_states = compute_review_states(&active, policy.as_ref(), now);
+        review_states.extend(compute_review_states(&snoozed_merged, policy.as_ref(), now));
+        self.review_states = review_states;
 
         // Replace PR lists
         self.active_prs = active;
@@ -817,6 +822,42 @@ mod tests {
         app.current_view = View::Snoozed;
         app.table_state.select(Some(0));
         app
+    }
+
+    // LOCKED: regression for lost wake tags on snoozed rows (pr-pal#2 Copilot review).
+    // A manually snoozed PR can wake during a refresh; when it later moves to
+    // Active in-memory (unsnooze/undo) its wake tag must still render, so
+    // update_prs must compute review states for Snoozed rows too.
+    #[test]
+    fn update_prs_computes_wake_states_for_snoozed_rows() {
+        let url = "https://x/snoozed-woken";
+        let mut app = test_app("wake-states-snoozed");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+
+        // Manually snoozed row whose author pushed after my review.
+        let mut signals = ReviewSignals {
+            my_last_review_at: Some(Utc::now() - Duration::days(5)),
+            ..Default::default()
+        };
+        signals.last_commit_at = Some(Utc::now() - Duration::days(1));
+        let snoozed = vec![(test_pr(url, signals), ScoreResult::default())];
+
+        app.update_prs(crate::fetch::FetchedPrs {
+            active: vec![],
+            suppressed: vec![],
+            snoozed,
+            rate_limit_remaining: None,
+        });
+
+        assert_eq!(
+            app.review_states.get(url),
+            Some(&ReviewState::Pushed),
+            "snoozed rows must carry their wake state"
+        );
     }
 
     // LOCKED: regression for expired-snooze guards (pr-pal#2 Copilot review).
