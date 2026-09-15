@@ -411,16 +411,21 @@ async fn enrich_pr(
                         pr.signals.commit_after_my_activity = timeline.commit_after_my_activity;
                     }
                     Err(e) => {
-                        buffered_eprintln!(
-                            "Warning: Failed to fetch timeline for PR {}: {}",
-                            pr.number,
-                            e
-                        );
                         // Fail open: without timeline data the review anchor
                         // would classify this PR as awaiting-author and hide
                         // it. Clear the anchor so it stays active;
                         // user_has_reviewed is kept for legacy scoring.
                         pr.signals.my_last_review_at = None;
+                        if is_rate_limit_error(&e) {
+                            // Propagate so the caller trips the shared stop
+                            // flag instead of hammering a spent rate limit.
+                            return Err(e);
+                        }
+                        buffered_eprintln!(
+                            "Warning: Failed to fetch timeline for PR {}: {}",
+                            pr.number,
+                            e
+                        );
                     }
                 }
             }
@@ -457,11 +462,24 @@ async fn enrich_pr(
             Ok(())
         }
         Err(e) => {
+            if is_rate_limit_error(&e) {
+                // Propagate so the caller trips the shared stop flag.
+                return Err(e);
+            }
             // If enrichment fails, log but don't fail the whole operation
             buffered_eprintln!("Warning: Failed to enrich PR {}: {}", pr.number, e);
             Ok(())
         }
     }
+}
+
+/// True when any error in the chain looks like a GitHub rate limit.
+///
+/// Uses the alternate format so context wrappers (e.g. "Failed to fetch PR
+/// timeline") don't mask the underlying 403 / rate-limit message.
+fn is_rate_limit_error(err: &anyhow::Error) -> bool {
+    let chain = format!("{err:#}");
+    chain.contains("rate limit") || chain.contains("403")
 }
 
 /// Helper function for concurrent PR enrichment
@@ -488,8 +506,7 @@ async fn enrich_pr_with_rate_limit_check(
     {
         Ok(_) => {}
         Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("rate limit") || err_str.contains("403") {
+            if is_rate_limit_error(&e) {
                 buffered_eprintln!(
                     "Warning: Rate limit hit during enrichment. Returning partial results."
                 );
@@ -1182,6 +1199,69 @@ mod tests {
         assert_eq!(
             pr.signals.my_last_review_at, None,
             "anchor must clear so the PR is not suppressed on API failure"
+        );
+    }
+
+    // LOCKED: regression for swallowed timeline rate limit (pr-pal#2 Copilot review).
+    // A rate-limited timeline fetch must trip the shared stop flag so the
+    // remaining PRs skip enrichment; ordinary errors keep failing open
+    // (covered by enrichment_fails_open_when_timeline_errors).
+    #[tokio::test]
+    async fn enrichment_rate_limited_timeline_trips_stop_flag() {
+        let server = MockServer::start().await;
+        mount_common_enrichment_mocks(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/issues/5/timeline"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "message": "API rate limit exceeded for user",
+                "documentation_url": "https://docs.github.com/rest/overview/rate-limits"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Octocrab::builder()
+            .base_uri(server.uri())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let pr = PullRequest {
+            title: "t".to_string(),
+            number: 5,
+            author: "a".to_string(),
+            repo: "o/r".to_string(),
+            url: "https://github.com/o/r/pull/5".to_string(),
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-01T00:00:00Z"),
+            additions: 0,
+            deletions: 0,
+            approvals: 0,
+            draft: false,
+            labels: vec![],
+            user_has_reviewed: false,
+            filtered_size: None,
+            signals: Default::default(),
+        };
+
+        let rate_limited = Arc::new(AtomicBool::new(false));
+        let enriched = enrich_pr_with_rate_limit_check(
+            client,
+            pr,
+            Arc::clone(&rate_limited),
+            Some("me".to_string()),
+            None,
+            true,
+        )
+        .await;
+
+        assert!(
+            rate_limited.load(Ordering::Relaxed),
+            "rate-limited timeline fetch must set the stop flag"
+        );
+        assert_eq!(
+            enriched.signals.my_last_review_at, None,
+            "anchor still clears so partial results fail open"
         );
     }
 
