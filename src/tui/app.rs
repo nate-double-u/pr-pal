@@ -588,7 +588,9 @@ impl App {
         }
     }
 
-    /// u: put the selected row back in Active, whichever hide it is under.
+    /// u: drop the selected row's manual hide, snooze or ignore. Where it
+    /// lands is up to the policy: Active, or Snoozed if it is still
+    /// awaiting the author.
     pub fn restore_selected(&mut self) {
         match self.current_view {
             View::Active => {}

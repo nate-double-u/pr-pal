@@ -638,7 +638,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         ("b", "Score breakdown"),
         ("s", "Snooze / re-snooze PR"),
         ("i", "Ignore PR (hide for good)"),
-        ("u", "Restore PR to Active"),
+        ("u", "Unsnooze / unignore PR"),
         ("z", "Undo last action"),
         ("Tab / Shift-Tab", "Next / previous view"),
         ("r", "Refresh PRs (bypasses cache)"),
