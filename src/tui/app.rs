@@ -575,6 +575,20 @@ impl App {
         self.snooze_input.clear();
     }
 
+    /// Type into the snooze modal. On an empty input, `i` is the ignore
+    /// shortcut the prompt advertises; after that it is just a letter
+    /// (`5min`). Only alphanumerics and spaces are accepted.
+    pub fn snooze_input_char(&mut self, c: char) {
+        if c == 'i' && self.snooze_input.trim().is_empty() {
+            self.cancel_snooze_input();
+            self.ignore_selected();
+            return;
+        }
+        if c.is_alphanumeric() || c == ' ' {
+            self.snooze_input.push(c);
+        }
+    }
+
     /// u: put the selected row back in Active, whichever hide it is under.
     pub fn restore_selected(&mut self) {
         match self.current_view {
@@ -2038,5 +2052,56 @@ mod ignore_tests {
             flash.is_some_and(|m| m.contains("duration")),
             "flash should ask for a duration, got {flash:?}"
         );
+    }
+
+    // --- snooze modal ---
+
+    // LOCKED: regression for #8 review (modal advertised `i to ignore` but typed the letter)
+    #[test]
+    fn i_on_empty_snooze_input_ignores_and_closes_modal() {
+        let url = "https://x/active";
+        let mut app = app_with_active_row("modal-i-ignores", url);
+        app.start_snooze_input();
+        assert_eq!(app.input_mode, InputMode::SnoozeInput);
+
+        app.snooze_input_char('i');
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.snooze_input.is_empty());
+        assert!(app.ignore_state.is_ignored(url));
+        assert!(app.active_prs.is_empty());
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(flash(&app).starts_with("Ignored:"), "got {:?}", flash(&app));
+    }
+
+    // LOCKED: regression for #8 review (modal advertised `i to ignore` but typed the letter)
+    #[test]
+    fn i_after_other_input_is_just_a_letter() {
+        let url = "https://x/active";
+        let mut app = app_with_active_row("modal-5min", url);
+        app.start_snooze_input();
+
+        for c in "5m".chars() {
+            app.snooze_input_char(c);
+        }
+        app.snooze_input_char('i');
+        app.snooze_input_char('n');
+
+        assert_eq!(app.snooze_input, "5min");
+        assert_eq!(app.input_mode, InputMode::SnoozeInput);
+        assert!(!app.ignore_state.is_ignored(url));
+        assert_eq!(app.active_prs.len(), 1);
+    }
+
+    #[test]
+    fn snooze_input_accepts_only_alphanumerics_and_spaces() {
+        let mut app = app_with_active_row("modal-filter", "https://x/active");
+        app.start_snooze_input();
+
+        for c in "1w 2d!-".chars() {
+            app.snooze_input_char(c);
+        }
+
+        assert_eq!(app.snooze_input, "1w 2d");
     }
 }

@@ -286,10 +286,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
                     app.snooze_input.pop();
                 }
 
-                // Character input (alphanumeric + space)
-                KeyCode::Char(c) if c.is_alphanumeric() || c == ' ' => {
-                    app.snooze_input.push(c);
-                }
+                // Character input (alphanumeric + space); `i` on an empty
+                // input ignores instead
+                KeyCode::Char(c) => app.snooze_input_char(c),
 
                 // Ignore all other keys (don't propagate to Normal mode)
                 _ => {}
