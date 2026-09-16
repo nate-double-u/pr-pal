@@ -61,6 +61,38 @@ pub fn compute_review_states(
 pub enum View {
     Active,
     Snoozed,
+    Ignored,
+}
+
+impl View {
+    /// Tab order: Active, Snoozed, Ignored.
+    pub fn next(self) -> View {
+        match self {
+            View::Active => View::Snoozed,
+            View::Snoozed => View::Ignored,
+            View::Ignored => View::Active,
+        }
+    }
+
+    pub fn previous(self) -> View {
+        match self {
+            View::Active => View::Ignored,
+            View::Snoozed => View::Active,
+            View::Ignored => View::Snoozed,
+        }
+    }
+}
+
+/// Where a row was before `i` ignored it, so undo can put it back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PreIgnore {
+    Active,
+    /// Awaiting author under the suppression policy.
+    Suppressed,
+    /// Manually snoozed until this time.
+    Snoozed {
+        until: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +111,9 @@ pub enum UndoAction {
         /// The row was suppressed (awaiting author) before the manual snooze;
         /// undo restores suppression instead of activating the row.
         was_suppressed: bool,
+        /// The row was ignored (since this time) before the snooze; undo
+        /// restores the ignore.
+        was_ignored_at: Option<DateTime<Utc>>,
     },
     Unsnoozed {
         url: String,
@@ -94,6 +129,19 @@ pub enum UndoAction {
         url: String,
         title: String,
         previous_until: DateTime<Utc>,
+    },
+    Ignored {
+        url: String,
+        title: String,
+        before: PreIgnore,
+    },
+    Unignored {
+        url: String,
+        title: String,
+        ignored_at: DateTime<Utc>,
+        /// The row resolved to awaiting-author when unignored, so it went
+        /// to Snoozed as suppressed; undo drops the marker.
+        became_suppressed: bool,
     },
 }
 
@@ -240,15 +288,21 @@ impl App {
     }
 
     pub fn current_prs(&self) -> &[(PullRequest, ScoreResult)] {
-        match self.current_view {
+        self.list(self.current_view)
+    }
+
+    fn list(&self, view: View) -> &[(PullRequest, ScoreResult)] {
+        match view {
             View::Active => &self.active_prs,
             View::Snoozed => &self.snoozed_prs,
+            View::Ignored => &self.ignored_prs,
         }
     }
 
     /// All scores across active and snoozed rows: the full distribution
     /// score tiers are computed from, so colors are stable across views
-    /// and don't jump when a row is snoozed.
+    /// and don't jump when a row is snoozed. Ignored rows are never ranked
+    /// and stay out of the pool.
     pub fn score_pool(&self) -> Vec<f64> {
         self.active_prs
             .iter()
@@ -455,7 +509,10 @@ impl App {
             .map(|entry| entry.snooze_until)
             .filter(|_| was_manually_snoozed);
 
-        // Apply snooze
+        // Apply snooze. A PR is in one hide list at a time, so snoozing an
+        // ignored row (s in the Ignored view) drops the ignore.
+        let was_ignored_at = self.ignored_at(&url);
+        self.ignore_state.unignore(&url);
         self.snooze_state.snooze(url.clone(), computed_until);
 
         // Save to disk
@@ -466,15 +523,16 @@ impl App {
 
         // Branch behavior based on current view
         match self.current_view {
-            View::Active => {
+            View::Active | View::Ignored => {
                 // Push to undo stack
                 self.push_undo(UndoAction::Snoozed {
                     url: url.clone(),
                     title: title.clone(),
                     was_suppressed: false,
+                    was_ignored_at,
                 });
 
-                // Move PR from active to snoozed
+                // Move PR to snoozed
                 self.relocate(&url);
 
                 // Show flash message
@@ -499,6 +557,7 @@ impl App {
                         url: url.clone(),
                         title: title.clone(),
                         was_suppressed,
+                        was_ignored_at: None,
                     });
                     self.show_flash(format!("Snoozed: {} (z to undo)", title));
                 }
@@ -514,6 +573,54 @@ impl App {
     pub fn cancel_snooze_input(&mut self) {
         self.input_mode = InputMode::Normal;
         self.snooze_input.clear();
+    }
+
+    /// u: put the selected row back in Active, whichever hide it is under.
+    pub fn restore_selected(&mut self) {
+        match self.current_view {
+            View::Active => {}
+            View::Snoozed => self.unsnooze_selected(),
+            View::Ignored => self.unignore_selected(),
+        }
+    }
+
+    /// Unignore the selected PR (only works in Ignored view)
+    pub fn unignore_selected(&mut self) {
+        if self.current_view != View::Ignored {
+            return;
+        }
+        let (url, title) = match self.selected_pr() {
+            Some(pr) => (pr.url.clone(), pr.title.clone()),
+            None => return,
+        };
+        let Some(ignored_at) = self.ignored_at(&url) else {
+            return;
+        };
+
+        self.ignore_state.unignore(&url);
+        if !self.persist() {
+            return;
+        }
+
+        // With the ignore gone the policy governs the row again, exactly
+        // as after an unsnooze.
+        let became_suppressed = self.still_suppressed_now(&url).unwrap_or(false);
+        self.push_undo(UndoAction::Unignored {
+            url: url.clone(),
+            title: title.clone(),
+            ignored_at,
+            became_suppressed,
+        });
+        if became_suppressed {
+            self.suppressed_urls.insert(url.clone());
+        }
+        self.relocate(&url);
+
+        if became_suppressed {
+            self.show_flash(format!("Unignored: {} (awaiting author; z to undo)", title));
+        } else {
+            self.show_flash(format!("Unignored: {} (z to undo)", title));
+        }
     }
 
     /// Unsnooze the selected PR (only works in Snoozed view)
@@ -588,12 +695,55 @@ impl App {
         let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
             .ok()
             .flatten()?;
-        let (pr, _) = self.snoozed_prs.iter().find(|(pr, _)| pr.url == url)?;
+        let (pr, _) = self.find_row(url)?;
         Some(crate::snooze::is_suppressed_by_policy(
             &pr.signals,
             &policy,
             Utc::now(),
         ))
+    }
+
+    fn find_row(&self, url: &str) -> Option<&(PullRequest, ScoreResult)> {
+        [View::Active, View::Snoozed, View::Ignored]
+            .into_iter()
+            .flat_map(|view| self.list(view))
+            .find(|(pr, _)| pr.url == url)
+    }
+
+    /// i: hide the selected PR for good. Works from any list: a snoozed or
+    /// suppressed row converts to an ignore, which outranks both.
+    pub fn ignore_selected(&mut self) {
+        let (url, title) = match self.selected_pr() {
+            Some(pr) => (pr.url.clone(), pr.title.clone()),
+            None => return,
+        };
+        if self.current_view == View::Ignored {
+            self.show_flash(format!("Already ignored: {} (u to restore)", title));
+            return;
+        }
+
+        let before = match self.snooze_state.snoozed_entries().get(&url) {
+            Some(entry) if self.snooze_state.is_snoozed(&url) => PreIgnore::Snoozed {
+                until: entry.snooze_until,
+            },
+            _ if self.suppressed_urls.contains(&url) => PreIgnore::Suppressed,
+            _ => PreIgnore::Active,
+        };
+
+        self.snooze_state.unsnooze(&url);
+        self.ignore_state.ignore(url.clone(), Utc::now());
+        if !self.persist() {
+            return;
+        }
+
+        self.suppressed_urls.remove(&url);
+        self.push_undo(UndoAction::Ignored {
+            url: url.clone(),
+            title: title.clone(),
+            before,
+        });
+        self.relocate(&url);
+        self.show_flash(format!("Ignored: {} (z to undo)", title));
     }
 
     /// Undo the last snooze or unsnooze action
@@ -611,9 +761,13 @@ impl App {
                 url,
                 title,
                 was_suppressed,
+                was_ignored_at,
             } => {
-                // Undo a snooze: unsnooze the PR
+                // Undo a snooze: unsnooze the PR, restoring an ignore it replaced
                 self.snooze_state.unsnooze(&url);
+                if let Some(at) = was_ignored_at {
+                    self.ignore_state.ignore(url.clone(), at);
+                }
 
                 // Save to disk
                 if !self.persist() {
@@ -623,8 +777,9 @@ impl App {
                 // Re-evaluate against current signals for every removed
                 // snooze; the snapshot only stands when policy or row can't
                 // be resolved. A row can become awaiting-author (or wake)
-                // while snoozed.
-                let suppressed = self.still_suppressed_now(&url).unwrap_or(was_suppressed);
+                // while snoozed. A restored ignore outranks either.
+                let suppressed = was_ignored_at.is_none()
+                    && self.still_suppressed_now(&url).unwrap_or(was_suppressed);
                 if suppressed {
                     self.suppressed_urls.insert(url.clone());
                 }
@@ -678,6 +833,50 @@ impl App {
                 // PR stays in snoozed list -- no move needed
                 self.show_flash(format!("Undid re-snooze: {}", title));
             }
+            UndoAction::Ignored { url, title, before } => {
+                self.ignore_state.unignore(&url);
+                if let PreIgnore::Snoozed { until } = before {
+                    self.snooze_state.snooze(url.clone(), until);
+                }
+                if !self.persist() {
+                    return;
+                }
+
+                // As with undoing a snooze: re-evaluate suppression against
+                // current signals, falling back to the snapshot.
+                let suppressed = match before {
+                    PreIgnore::Snoozed { .. } => false,
+                    PreIgnore::Suppressed | PreIgnore::Active => self
+                        .still_suppressed_now(&url)
+                        .unwrap_or(before == PreIgnore::Suppressed),
+                };
+                if suppressed {
+                    self.suppressed_urls.insert(url.clone());
+                }
+                self.relocate(&url);
+
+                if suppressed {
+                    self.show_flash(format!("Undid ignore: {} (awaiting author)", title));
+                } else {
+                    self.show_flash(format!("Undid ignore: {}", title));
+                }
+            }
+            UndoAction::Unignored {
+                url,
+                title,
+                ignored_at,
+                became_suppressed,
+            } => {
+                self.ignore_state.ignore(url.clone(), ignored_at);
+                if !self.persist() {
+                    return;
+                }
+                if became_suppressed {
+                    self.suppressed_urls.remove(&url);
+                }
+                self.relocate(&url);
+                self.show_flash(format!("Undid unignore: {}", title));
+            }
         }
     }
 
@@ -694,10 +893,13 @@ impl App {
         }
     }
 
-    /// The view a row belongs in, derived from its hide state: a manual
-    /// snooze or a suppression marker puts it in Snoozed, otherwise Active.
+    /// The view a row belongs in, derived from its hide state, strongest
+    /// first: ignored, then a manual snooze or a suppression marker
+    /// (Snoozed), otherwise Active.
     fn target_view(&self, url: &str) -> View {
-        if self.snooze_state.is_snoozed(url) || self.suppressed_urls.contains(url) {
+        if self.ignore_state.is_ignored(url) {
+            View::Ignored
+        } else if self.snooze_state.is_snoozed(url) || self.suppressed_urls.contains(url) {
             View::Snoozed
         } else {
             View::Active
@@ -708,7 +910,29 @@ impl App {
         match view {
             View::Active => &mut self.active_prs,
             View::Snoozed => &mut self.snoozed_prs,
+            View::Ignored => &mut self.ignored_prs,
         }
+    }
+
+    fn ignored_at(&self, url: &str) -> Option<DateTime<Utc>> {
+        self.ignore_state.ignored.get(url).map(|e| e.ignored_at)
+    }
+
+    /// Where a row slots into a list: Active and Snoozed keep score order
+    /// (descending), Ignored keeps ignore order (oldest first).
+    fn insert_position(&self, view: View, entry: &(PullRequest, ScoreResult)) -> usize {
+        let list = self.list(view);
+        let pos = match view {
+            View::Ignored => {
+                let at = self.ignored_at(&entry.0.url);
+                list.iter()
+                    .position(|(pr, _)| self.ignored_at(&pr.url) > at)
+            }
+            View::Active | View::Snoozed => list
+                .iter()
+                .position(|(_, score)| score.score < entry.1.score),
+        };
+        pos.unwrap_or(list.len())
     }
 
     /// Move the row for `url` into whichever list its current state says it
@@ -716,11 +940,10 @@ impl App {
     /// relocate; a row already in the right list stays put.
     fn relocate(&mut self, url: &str) {
         let target = self.target_view(url);
-        let source = if self.active_prs.iter().any(|(pr, _)| pr.url == url) {
-            View::Active
-        } else if self.snoozed_prs.iter().any(|(pr, _)| pr.url == url) {
-            View::Snoozed
-        } else {
+        let Some(source) = [View::Active, View::Snoozed, View::Ignored]
+            .into_iter()
+            .find(|view| self.list(*view).iter().any(|(pr, _)| pr.url == url))
+        else {
             return;
         };
         if source == target {
@@ -734,13 +957,8 @@ impl App {
             .expect("row found in source list above");
         let pr_entry = source_list.remove(pos);
 
-        // Insert into destination list, maintaining score-descending sort
-        let dest_list = self.list_mut(target);
-        let insert_pos = dest_list
-            .iter()
-            .position(|(_, score)| score.score < pr_entry.1.score)
-            .unwrap_or(dest_list.len());
-        dest_list.insert(insert_pos, pr_entry);
+        let insert_pos = self.insert_position(target, &pr_entry);
+        self.list_mut(target).insert(insert_pos, pr_entry);
 
         // Fix table selection to stay valid
         let current_list = self.current_prs();
@@ -753,12 +971,18 @@ impl App {
         }
     }
 
-    /// Toggle between Active and Snoozed views
-    pub fn toggle_view(&mut self) {
-        self.current_view = match self.current_view {
-            View::Active => View::Snoozed,
-            View::Snoozed => View::Active,
-        };
+    /// Tab: Active -> Snoozed -> Ignored -> Active
+    pub fn next_view(&mut self) {
+        self.set_view(self.current_view.next());
+    }
+
+    /// Shift-Tab: the reverse of `next_view`
+    pub fn previous_view(&mut self) {
+        self.set_view(self.current_view.previous());
+    }
+
+    fn set_view(&mut self, view: View) {
+        self.current_view = view;
 
         // Reset selection to first item in the new view, or None if empty
         let prs = self.current_prs();
@@ -860,17 +1084,16 @@ impl App {
         let active_count = self.active_prs.len();
         let awaiting_count = self.suppressed_urls.len();
         let snoozed_count = self.snoozed_prs.len() - awaiting_count;
+        let ignored_count = self.ignored_prs.len();
+        let mut counts = vec![format!("{} active", active_count)];
         if awaiting_count > 0 {
-            self.show_flash(format!(
-                "Refreshed ({} active, {} awaiting author, {} snoozed)",
-                active_count, awaiting_count, snoozed_count
-            ));
-        } else {
-            self.show_flash(format!(
-                "Refreshed ({} active, {} snoozed)",
-                active_count, snoozed_count
-            ));
+            counts.push(format!("{} awaiting author", awaiting_count));
         }
+        counts.push(format!("{} snoozed", snoozed_count));
+        if ignored_count > 0 {
+            counts.push(format!("{} ignored", ignored_count));
+        }
+        self.show_flash(format!("Refreshed ({})", counts.join(", ")));
     }
 
     /// Advance the loading spinner animation frame
@@ -1408,7 +1631,7 @@ mod tests {
 mod ignore_tests {
     use super::*;
     use crate::review_state::ReviewSignals;
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     fn test_pr(url: &str) -> PullRequest {
         PullRequest {
@@ -1473,6 +1696,326 @@ mod ignore_tests {
         app.active_prs = vec![scored(url, 1.0)];
         app.table_state.select(Some(0));
         app
+    }
+
+    /// One ignored row (ignored `days_ago`), Ignored view, selected.
+    fn app_with_ignored_row(name: &str, url: &str, days_ago: i64) -> App {
+        let mut app = test_app(name);
+        app.ignored_prs = vec![scored(url, 1.0)];
+        app.ignore_state
+            .ignore(url.to_string(), Utc::now() - Duration::days(days_ago));
+        app.current_view = View::Ignored;
+        app.table_state.select(Some(0));
+        app
+    }
+
+    fn urls(list: &[(PullRequest, ScoreResult)]) -> Vec<&str> {
+        list.iter().map(|(pr, _)| pr.url.as_str()).collect()
+    }
+
+    fn flash(app: &App) -> &str {
+        app.flash_message.as_ref().map_or("", |(m, _)| m.as_str())
+    }
+
+    // --- views ---
+
+    #[test]
+    fn tab_cycles_forward_and_shift_tab_backward() {
+        let mut app = test_app("tab-cycle");
+        app.next_view();
+        assert_eq!(app.current_view, View::Snoozed);
+        app.next_view();
+        assert_eq!(app.current_view, View::Ignored);
+        app.next_view();
+        assert_eq!(app.current_view, View::Active);
+        app.previous_view();
+        assert_eq!(app.current_view, View::Ignored);
+        app.previous_view();
+        assert_eq!(app.current_view, View::Snoozed);
+    }
+
+    #[test]
+    fn ignored_view_lists_ignored_prs_and_selects_first() {
+        let mut app = test_app("ignored-view");
+        app.ignored_prs = vec![scored("https://x/ign", 1.0)];
+        app.next_view();
+        app.next_view();
+        assert_eq!(urls(app.current_prs()), vec!["https://x/ign"]);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    // Ignored rows are never ranked, so they must not shape the score tiers
+    // and bar scale the other views are colored by.
+    #[test]
+    fn score_pool_excludes_ignored() {
+        let mut app = test_app("pool-no-ignored");
+        app.active_prs = vec![scored("https://x/1", 100.0)];
+        app.ignored_prs = vec![scored("https://x/2", 9000.0)];
+        assert_eq!(app.score_pool(), vec![100.0]);
+    }
+
+    // --- i: ignore ---
+
+    #[test]
+    fn ignore_from_active_moves_row_to_ignored_and_persists() {
+        let url = "https://x/active";
+        let mut app = app_with_active_row("ignore-active", url);
+
+        app.ignore_selected();
+
+        assert!(app.active_prs.is_empty());
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(app.ignore_state.is_ignored(url));
+        assert_eq!(app.table_state.selected(), None, "Active view is now empty");
+        assert!(flash(&app).starts_with("Ignored:"), "got {:?}", flash(&app));
+
+        let on_disk = crate::ignore::load_ignore_state(&app.hide_paths.ignore).unwrap();
+        assert!(on_disk.is_ignored(url), "ignore.json written");
+    }
+
+    #[test]
+    fn undo_ignore_restores_active_row() {
+        let url = "https://x/active";
+        let mut app = app_with_active_row("undo-ignore", url);
+        app.ignore_selected();
+
+        app.undo_last();
+
+        assert_eq!(urls(&app.active_prs), vec![url]);
+        assert!(app.ignored_prs.is_empty());
+        assert!(!app.ignore_state.is_ignored(url));
+        assert!(
+            flash(&app).starts_with("Undid ignore:"),
+            "got {:?}",
+            flash(&app)
+        );
+    }
+
+    #[test]
+    fn ignore_with_no_selection_is_a_noop() {
+        let mut app = test_app("ignore-nothing");
+        app.ignore_selected();
+        assert!(app.ignore_state.ignored.is_empty());
+        assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn ignore_in_ignored_view_flashes_and_does_nothing() {
+        let url = "https://x/ign";
+        let mut app = app_with_ignored_row("ignore-twice", url, 1);
+        app.ignore_selected();
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(
+            flash(&app).starts_with("Already ignored"),
+            "got {:?}",
+            flash(&app)
+        );
+    }
+
+    fn awaiting_author_policy() -> crate::config::SuppressConfig {
+        crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        }
+    }
+
+    /// A row the policy resolves to awaiting-author: I reviewed, nothing since.
+    fn awaiting_author_row(url: &str) -> (PullRequest, ScoreResult) {
+        let mut pr = test_pr(url);
+        pr.signals = ReviewSignals {
+            my_last_review_at: Some(Utc::now() - Duration::days(3)),
+            ..Default::default()
+        };
+        (pr, ScoreResult::default())
+    }
+
+    // LOCKED: regression for hide precedence in the TUI (feat/ignore).
+    // `i` on a manually snoozed row converts it to an ignore (one list per
+    // PR, ignore wins); undo brings the snooze back with its wake time.
+    #[test]
+    fn ignore_outranks_snooze_in_tui() {
+        let url = "https://x/snoozed";
+        let until = Utc::now() + Duration::days(2);
+        let mut app = test_app("ignore-snoozed");
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.snooze_state.snooze(url.to_string(), until);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.ignore_selected();
+
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(app.snoozed_prs.is_empty());
+        assert!(app.ignore_state.is_ignored(url));
+        assert!(
+            !app.snooze_state.snoozed.contains_key(url),
+            "snooze entry dropped"
+        );
+
+        app.undo_last();
+
+        assert_eq!(urls(&app.snoozed_prs), vec![url]);
+        assert!(app.ignored_prs.is_empty());
+        assert!(!app.ignore_state.is_ignored(url));
+        assert_eq!(app.snooze_state.snoozed[url].snooze_until, until);
+    }
+
+    // LOCKED: regression for hide precedence in the TUI (feat/ignore).
+    // `i` on a suppressed (awaiting author) row ignores it outright, so no
+    // wake event can resurface it; undo restores suppression, not Active.
+    #[test]
+    fn ignore_outranks_suppression_in_tui() {
+        let url = "https://x/suppressed";
+        let mut app = test_app("ignore-suppressed");
+        app.config.suppress = Some(awaiting_author_policy());
+        app.snoozed_prs = vec![awaiting_author_row(url)];
+        app.suppressed_urls.insert(url.to_string());
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+
+        app.ignore_selected();
+
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(app.snoozed_prs.is_empty());
+        assert!(!app.suppressed_urls.contains(url), "marker cleared");
+        assert!(app.ignore_state.is_ignored(url));
+
+        app.undo_last();
+
+        assert_eq!(
+            urls(&app.snoozed_prs),
+            vec![url],
+            "back to Snoozed, not Active"
+        );
+        assert!(app.suppressed_urls.contains(url), "suppression restored");
+        assert!(!app.ignore_state.is_ignored(url));
+        assert!(
+            flash(&app).contains("awaiting author"),
+            "got {:?}",
+            flash(&app)
+        );
+    }
+
+    // --- u: unignore ---
+
+    #[test]
+    fn unignore_restores_row_to_active() {
+        let url = "https://x/ign";
+        let mut app = app_with_ignored_row("unignore", url, 5);
+
+        app.restore_selected();
+
+        assert_eq!(urls(&app.active_prs), vec![url]);
+        assert!(app.ignored_prs.is_empty());
+        assert!(!app.ignore_state.is_ignored(url));
+        assert!(
+            flash(&app).starts_with("Unignored:"),
+            "got {:?}",
+            flash(&app)
+        );
+        let on_disk = crate::ignore::load_ignore_state(&app.hide_paths.ignore).unwrap();
+        assert!(!on_disk.is_ignored(url), "ignore.json updated");
+    }
+
+    // Like unsnooze: with the ignore gone the policy governs the row again.
+    #[test]
+    fn unignore_to_awaiting_author_stays_hidden() {
+        let url = "https://x/ign-awaiting";
+        let mut app = app_with_ignored_row("unignore-awaiting", url, 5);
+        app.config.suppress = Some(awaiting_author_policy());
+        app.ignored_prs = vec![awaiting_author_row(url)];
+
+        app.restore_selected();
+
+        assert!(app.active_prs.is_empty());
+        assert_eq!(urls(&app.snoozed_prs), vec![url]);
+        assert!(app.suppressed_urls.contains(url));
+        assert!(
+            flash(&app).contains("awaiting author"),
+            "got {:?}",
+            flash(&app)
+        );
+
+        app.undo_last();
+
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(!app.suppressed_urls.contains(url));
+    }
+
+    #[test]
+    fn undo_unignore_restores_original_ignored_at_and_position() {
+        let older = "https://x/older";
+        let newer = "https://x/newer";
+        let mut app = app_with_ignored_row("undo-unignore", older, 30);
+        let original_at = app.ignore_state.ignored[older].ignored_at;
+        app.ignored_prs.push(scored(newer, 1.0));
+        app.ignore_state
+            .ignore(newer.to_string(), Utc::now() - Duration::days(1));
+
+        app.restore_selected();
+        assert_eq!(urls(&app.ignored_prs), vec![newer]);
+
+        app.undo_last();
+
+        assert_eq!(urls(&app.ignored_prs), vec![older, newer], "oldest first");
+        assert_eq!(app.ignore_state.ignored[older].ignored_at, original_at);
+        assert!(
+            flash(&app).starts_with("Undid unignore:"),
+            "got {:?}",
+            flash(&app)
+        );
+    }
+
+    #[test]
+    fn unignore_outside_ignored_view_is_a_noop() {
+        let url = "https://x/active";
+        let mut app = app_with_active_row("unignore-active", url);
+        app.unignore_selected();
+        assert_eq!(urls(&app.active_prs), vec![url]);
+        assert!(app.undo_stack.is_empty());
+    }
+
+    // --- s in Ignored: convert to a timed snooze ---
+
+    #[test]
+    fn snooze_from_ignored_converts_to_timed_snooze() {
+        let url = "https://x/ign";
+        let mut app = app_with_ignored_row("snooze-ignored", url, 5);
+        app.start_snooze_input();
+        assert_eq!(app.input_mode, InputMode::SnoozeInput);
+        app.snooze_input = "2h".to_string();
+
+        app.confirm_snooze_input();
+
+        assert_eq!(urls(&app.snoozed_prs), vec![url]);
+        assert!(app.ignored_prs.is_empty());
+        assert!(app.snooze_state.is_snoozed(url));
+        assert!(!app.ignore_state.is_ignored(url), "one list per PR");
+        assert!(flash(&app).starts_with("Snoozed:"), "got {:?}", flash(&app));
+    }
+
+    #[test]
+    fn undo_snooze_from_ignored_restores_ignore() {
+        let url = "https://x/ign";
+        let mut app = app_with_ignored_row("undo-snooze-ignored", url, 5);
+        let original_at = app.ignore_state.ignored[url].ignored_at;
+        app.start_snooze_input();
+        app.snooze_input = "2h".to_string();
+        app.confirm_snooze_input();
+
+        app.undo_last();
+
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        assert!(app.snoozed_prs.is_empty());
+        assert!(!app.snooze_state.snoozed.contains_key(url));
+        assert_eq!(app.ignore_state.ignored[url].ignored_at, original_at);
+        assert!(
+            flash(&app).starts_with("Undid snooze:"),
+            "got {:?}",
+            flash(&app)
+        );
     }
 
     // Snooze means "wake me later": an empty duration is an error, not an

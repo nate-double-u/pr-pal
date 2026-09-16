@@ -244,14 +244,18 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
                 // Snooze
                 KeyCode::Char('s') => app.start_snooze_input(),
 
-                // Unsnooze
-                KeyCode::Char('u') => app.unsnooze_selected(),
+                // Ignore (hide for good)
+                KeyCode::Char('i') => app.ignore_selected(),
+
+                // Restore to Active
+                KeyCode::Char('u') => app.restore_selected(),
 
                 // Undo
                 KeyCode::Char('z') => app.undo_last(),
 
-                // Tab switching
-                KeyCode::Tab => app.toggle_view(),
+                // View switching
+                KeyCode::Tab => app.next_view(),
+                KeyCode::BackTab => app.previous_view(),
 
                 // Refresh (manual = force fresh data)
                 KeyCode::Char('r') => {
