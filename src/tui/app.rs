@@ -56,7 +56,7 @@ pub fn compute_review_states(
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum View {
     Active,
     Snoozed,
@@ -466,7 +466,7 @@ impl App {
                 });
 
                 // Move PR from active to snoozed
-                self.move_pr_between_lists(&url, true);
+                self.relocate(&url);
 
                 // Show flash message
                 self.show_flash(format!("Snoozed: {} (z to undo)", title));
@@ -561,10 +561,12 @@ impl App {
 
         if became_suppressed {
             self.suppressed_urls.insert(url.clone());
+        }
+        self.relocate(&url);
+
+        if became_suppressed {
             self.show_flash(format!("Unsnoozed: {} (awaiting author; z to undo)", title));
         } else {
-            // Move PR from snoozed to active
-            self.move_pr_between_lists(&url, false);
             self.show_flash(format!("Unsnoozed: {} (z to undo)", title));
         }
     }
@@ -617,12 +619,15 @@ impl App {
                 // snooze; the snapshot only stands when policy or row can't
                 // be resolved. A row can become awaiting-author (or wake)
                 // while snoozed.
-                if self.still_suppressed_now(&url).unwrap_or(was_suppressed) {
+                let suppressed = self.still_suppressed_now(&url).unwrap_or(was_suppressed);
+                if suppressed {
                     self.suppressed_urls.insert(url.clone());
+                }
+                self.relocate(&url);
+
+                if suppressed {
                     self.show_flash(format!("Undid snooze: {} (awaiting author)", title));
                 } else {
-                    // Move PR back from snoozed to active
-                    self.move_pr_between_lists(&url, false);
                     self.show_flash(format!("Undid snooze: {}", title));
                 }
             }
@@ -647,10 +652,9 @@ impl App {
                     // The row never left the Snoozed view; drop the marker so
                     // it shows as manually snoozed again.
                     self.suppressed_urls.remove(&url);
-                } else {
-                    // Move PR back from active to snoozed
-                    self.move_pr_between_lists(&url, true);
                 }
+                // Move PR back from active to snoozed (no-op if it never left)
+                self.relocate(&url);
 
                 self.show_flash(format!("Undid unsnooze: {}", title));
             }
@@ -676,37 +680,61 @@ impl App {
         }
     }
 
-    /// Move a PR between active and snoozed lists
-    ///
-    /// # Arguments
-    /// * `url` - The URL of the PR to move
-    /// * `from_active_to_snoozed` - true to move from active to snoozed, false for the reverse
-    fn move_pr_between_lists(&mut self, url: &str, from_active_to_snoozed: bool) {
-        let (source_list, dest_list) = if from_active_to_snoozed {
-            (&mut self.active_prs, &mut self.snoozed_prs)
+    /// The view a row belongs in, derived from its hide state: a manual
+    /// snooze or a suppression marker puts it in Snoozed, otherwise Active.
+    fn target_view(&self, url: &str) -> View {
+        if self.snooze_state.is_snoozed(url) || self.suppressed_urls.contains(url) {
+            View::Snoozed
         } else {
-            (&mut self.snoozed_prs, &mut self.active_prs)
+            View::Active
+        }
+    }
+
+    fn list_mut(&mut self, view: View) -> &mut Vec<(PullRequest, ScoreResult)> {
+        match view {
+            View::Active => &mut self.active_prs,
+            View::Snoozed => &mut self.snoozed_prs,
+        }
+    }
+
+    /// Move the row for `url` into whichever list its current state says it
+    /// belongs in. Callers mutate snooze state and suppression markers, then
+    /// relocate; a row already in the right list stays put.
+    fn relocate(&mut self, url: &str) {
+        let target = self.target_view(url);
+        let source = if self.active_prs.iter().any(|(pr, _)| pr.url == url) {
+            View::Active
+        } else if self.snoozed_prs.iter().any(|(pr, _)| pr.url == url) {
+            View::Snoozed
+        } else {
+            return;
         };
+        if source == target {
+            return;
+        }
 
-        // Find and remove PR from source list
-        if let Some(pos) = source_list.iter().position(|(pr, _)| pr.url == url) {
-            let pr_entry = source_list.remove(pos);
+        let source_list = self.list_mut(source);
+        let pos = source_list
+            .iter()
+            .position(|(pr, _)| pr.url == url)
+            .expect("row found in source list above");
+        let pr_entry = source_list.remove(pos);
 
-            // Insert into destination list, maintaining score-descending sort
-            let insert_pos = dest_list
-                .iter()
-                .position(|(_, score)| score.score < pr_entry.1.score)
-                .unwrap_or(dest_list.len());
-            dest_list.insert(insert_pos, pr_entry);
+        // Insert into destination list, maintaining score-descending sort
+        let dest_list = self.list_mut(target);
+        let insert_pos = dest_list
+            .iter()
+            .position(|(_, score)| score.score < pr_entry.1.score)
+            .unwrap_or(dest_list.len());
+        dest_list.insert(insert_pos, pr_entry);
 
-            // Fix table selection to stay valid
-            let current_list = self.current_prs();
-            if current_list.is_empty() {
-                self.table_state.select(None);
-            } else if let Some(selected) = self.table_state.selected() {
-                if selected >= current_list.len() {
-                    self.table_state.select(Some(current_list.len() - 1));
-                }
+        // Fix table selection to stay valid
+        let current_list = self.current_prs();
+        if current_list.is_empty() {
+            self.table_state.select(None);
+        } else if let Some(selected) = self.table_state.selected() {
+            if selected >= current_list.len() {
+                self.table_state.select(Some(current_list.len() - 1));
             }
         }
     }
