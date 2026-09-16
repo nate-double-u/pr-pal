@@ -26,6 +26,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
     let client_clone = client.clone();
     let config_clone = app.config.clone();
     let snooze_clone = app.snooze_state.clone();
+    let ignore_clone = app.ignore_state.clone();
     let cache_config_clone = app.cache_config.clone();
     let verbose = app.verbose;
     let auth_username_clone = app.auth_username.clone();
@@ -37,6 +38,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                 &client_clone,
                 &config_clone,
                 &snooze_clone,
+                &ignore_clone,
                 &cache_config_clone,
                 verbose,
                 auth_username_clone.as_deref(),
@@ -166,6 +168,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                 let client_clone = client.clone();
                 let config_clone = app.config.clone();
                 let snooze_clone = app.snooze_state.clone();
+                let ignore_clone = app.ignore_state.clone();
                 let cache_config_clone = app.cache_config.clone();
                 let verbose = app.verbose;
                 let auth_username_clone = app.auth_username.clone();
@@ -177,6 +180,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                             &client_clone,
                             &config_clone,
                             &snooze_clone,
+                            &ignore_clone,
                             &cache_config_clone,
                             verbose,
                             auth_username_clone.as_deref(),

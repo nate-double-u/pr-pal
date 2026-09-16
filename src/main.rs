@@ -365,6 +365,7 @@ async fn main() {
             &current_client,
             &config,
             &snooze_state,
+            &ignore_state,
             &cache_config,
             cli.verbose,
             current_auth_username.as_deref(),

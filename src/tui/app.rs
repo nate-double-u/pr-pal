@@ -103,6 +103,8 @@ pub struct App {
     pub snoozed_prs: Vec<(PullRequest, ScoreResult)>,
     /// URLs of PRs suppressed as awaiting-author (subset of snoozed_prs)
     pub suppressed_urls: HashSet<String>,
+    /// Permanently hidden PRs, oldest ignore first
+    pub ignored_prs: Vec<(PullRequest, ScoreResult)>,
     /// Review-cycle state per PR URL, for wake-reason tags
     pub review_states: HashMap<String, ReviewState>,
     pub table_state: ratatui::widgets::TableState,
@@ -159,6 +161,7 @@ impl App {
             active_prs,
             snoozed_prs,
             suppressed_urls: HashSet::new(),
+            ignored_prs: Vec::new(),
             review_states: HashMap::new(),
             table_state,
             current_view: View::Active,
@@ -206,6 +209,7 @@ impl App {
             active_prs: Vec::new(),
             snoozed_prs: Vec::new(),
             suppressed_urls: HashSet::new(),
+            ignored_prs: Vec::new(),
             review_states: HashMap::new(),
             table_state: ratatui::widgets::TableState::default(),
             current_view: View::Active,
@@ -801,6 +805,7 @@ impl App {
             active,
             suppressed,
             snoozed,
+            ignored,
             rate_limit_remaining,
         } = fetched;
 
@@ -823,6 +828,7 @@ impl App {
         self.active_prs = active;
         self.snoozed_prs = snoozed_merged;
         self.suppressed_urls = suppressed_urls;
+        self.ignored_prs = ignored;
 
         // Update rate limit info
         self.rate_limit_remaining = rate_limit_remaining;
@@ -1068,6 +1074,7 @@ mod tests {
             active: vec![],
             suppressed: vec![],
             snoozed,
+            ignored: vec![],
             rate_limit_remaining: None,
         });
 

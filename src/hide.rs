@@ -1,15 +1,58 @@
-//! Persistence for the two hide files in the config dir: `snooze.json`
-//! (timed snoozes) and `ignore.json` (permanent ignores).
+//! The two ways a PR can be hidden, and how they combine.
 //!
-//! `snooze.json` keeps its pr-bro / pr-pal 1.x schema so older readers still
-//! load it; the one legacy shape, `snooze_until: null` (an indefinite
-//! snooze), is read as an ignore because that was always its intent. Saving
-//! writes both files together so they cannot drift apart.
+//! A snooze is timed and always wakes; an ignore is permanent. Ignore is
+//! the stronger hide, so it is applied first when partitioning and wins if
+//! a URL is somehow in both states.
+//!
+//! Each lives in its own file in the config dir. `snooze.json` keeps its
+//! pr-bro / pr-pal 1.x schema so older readers still load it; the one
+//! legacy shape, `snooze_until: null` (an indefinite snooze), is read as an
+//! ignore because that was always its intent. Saving writes both files
+//! together so they cannot drift apart.
 
+use crate::github::types::PullRequest;
 use crate::ignore::{IgnoreEntry, IgnoreState};
-use crate::snooze::SnoozeState;
+use crate::snooze::{partition_prs, SnoozeState, SuppressPolicy};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
+
+/// Fetched PRs split by hide state, unscored.
+#[derive(Debug)]
+pub struct HiddenPrs {
+    pub active: Vec<PullRequest>,
+    /// Awaiting the author under the suppression policy.
+    pub suppressed: Vec<PullRequest>,
+    pub snoozed: Vec<PullRequest>,
+    /// Oldest ignore first. Ignored PRs are a record, not a queue, so they
+    /// are never ranked by score.
+    pub ignored: Vec<PullRequest>,
+}
+
+/// Split PRs into active / suppressed / snoozed / ignored.
+///
+/// Ignore is checked first so an ignored PR never also shows as snoozed or
+/// suppressed; the rest go through `partition_prs`, where a manual snooze
+/// outranks suppression.
+pub fn partition_hidden(
+    prs: Vec<PullRequest>,
+    snooze: &SnoozeState,
+    ignore: &IgnoreState,
+    policy: Option<&SuppressPolicy>,
+    now: DateTime<Utc>,
+) -> HiddenPrs {
+    let (mut ignored, rest): (Vec<PullRequest>, Vec<PullRequest>) =
+        prs.into_iter().partition(|pr| ignore.is_ignored(&pr.url));
+    ignored.sort_by_key(|pr| ignore.ignored[&pr.url].ignored_at);
+
+    let rest = partition_prs(rest, snooze, policy, now);
+    HiddenPrs {
+        active: rest.active,
+        suppressed: rest.suppressed,
+        snoozed: rest.snoozed,
+        ignored,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HidePaths {
@@ -64,7 +107,8 @@ pub fn save_hide_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Duration, Utc};
+    use crate::config::WakeEvent;
+    use chrono::Duration;
     use std::fs;
 
     const URL_A: &str = "https://github.com/o/r/pull/1";
@@ -214,5 +258,123 @@ mod tests {
         let paths = temp_paths("bad-version");
         fs::write(&paths.ignore, r#"{"version": 99, "ignored": {}}"#).unwrap();
         assert!(load_hide_state(&paths).is_err());
+    }
+
+    // --- partition_hidden ---
+
+    fn pr(number: u64) -> PullRequest {
+        PullRequest {
+            title: format!("PR {number}"),
+            number,
+            author: "a".to_string(),
+            repo: "o/r".to_string(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            additions: 0,
+            deletions: 0,
+            approvals: 0,
+            draft: false,
+            labels: vec![],
+            user_has_reviewed: false,
+            filtered_size: None,
+            signals: Default::default(),
+        }
+    }
+
+    /// A PR the suppression policy would hide as awaiting-author.
+    fn awaiting_author_pr(number: u64) -> PullRequest {
+        let mut pr = pr(number);
+        pr.user_has_reviewed = true;
+        pr.signals.my_last_review_at = Some(Utc::now() - Duration::days(3));
+        pr
+    }
+
+    fn policy() -> SuppressPolicy {
+        SuppressPolicy {
+            wake_on: vec![WakeEvent::Push],
+            resurface_after: Some(Duration::days(21)),
+        }
+    }
+
+    fn numbers(prs: &[PullRequest]) -> Vec<u64> {
+        prs.iter().map(|p| p.number).collect()
+    }
+
+    #[test]
+    fn partition_routes_each_pr_to_one_list() {
+        let mut snooze = SnoozeState::new();
+        snooze.snooze(pr(2).url, Utc::now() + Duration::days(1));
+        let mut ignore = IgnoreState::new();
+        ignore.ignore(pr(4).url, Utc::now());
+
+        let split = partition_hidden(
+            vec![pr(1), pr(2), awaiting_author_pr(3), pr(4)],
+            &snooze,
+            &ignore,
+            Some(&policy()),
+            Utc::now(),
+        );
+
+        assert_eq!(numbers(&split.active), vec![1]);
+        assert_eq!(numbers(&split.snoozed), vec![2]);
+        assert_eq!(numbers(&split.suppressed), vec![3]);
+        assert_eq!(numbers(&split.ignored), vec![4]);
+    }
+
+    // LOCKED: regression for hide precedence (feat/ignore).
+    // Ignore outranks a manual snooze: a URL in both states is ignored only.
+    #[test]
+    fn ignore_outranks_snooze() {
+        let mut snooze = SnoozeState::new();
+        snooze.snooze(pr(1).url, Utc::now() + Duration::days(1));
+        let mut ignore = IgnoreState::new();
+        ignore.ignore(pr(1).url, Utc::now());
+
+        let split = partition_hidden(vec![pr(1)], &snooze, &ignore, None, Utc::now());
+
+        assert_eq!(numbers(&split.ignored), vec![1]);
+        assert!(split.snoozed.is_empty());
+        assert!(split.active.is_empty());
+    }
+
+    // LOCKED: regression for hide precedence (feat/ignore).
+    // Ignore outranks suppression: an ignored PR awaiting its author is
+    // ignored, not suppressed, so it cannot resurface on a wake event.
+    #[test]
+    fn ignore_outranks_suppression() {
+        let mut ignore = IgnoreState::new();
+        ignore.ignore(pr(1).url, Utc::now());
+
+        let split = partition_hidden(
+            vec![awaiting_author_pr(1)],
+            &SnoozeState::new(),
+            &ignore,
+            Some(&policy()),
+            Utc::now(),
+        );
+
+        assert_eq!(numbers(&split.ignored), vec![1]);
+        assert!(split.suppressed.is_empty());
+        assert!(split.active.is_empty());
+    }
+
+    #[test]
+    fn ignored_list_is_oldest_ignore_first() {
+        let now = Utc::now();
+        let mut ignore = IgnoreState::new();
+        ignore.ignore(pr(1).url, now - Duration::days(1));
+        ignore.ignore(pr(2).url, now - Duration::days(30));
+        ignore.ignore(pr(3).url, now - Duration::days(7));
+
+        let split = partition_hidden(
+            vec![pr(1), pr(2), pr(3)],
+            &SnoozeState::new(),
+            &ignore,
+            None,
+            now,
+        );
+
+        assert_eq!(numbers(&split.ignored), vec![2, 3, 1]);
     }
 }
