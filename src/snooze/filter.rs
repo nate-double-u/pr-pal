@@ -171,7 +171,8 @@ mod tests {
     #[test]
     fn test_filter_active_removes_snoozed() {
         let mut state = SnoozeState::new();
-        state.snooze("https://github.com/owner/repo/pull/1".to_string(), None);
+        let future = Utc::now() + Duration::hours(1);
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), future);
 
         let prs = vec![
             create_test_pr(1, "https://github.com/owner/repo/pull/1"),
@@ -200,10 +201,7 @@ mod tests {
     fn test_filter_active_keeps_expired() {
         let mut state = SnoozeState::new();
         let past = Utc::now() - Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/1".to_string(),
-            Some(past),
-        );
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), past);
 
         let prs = vec![
             create_test_pr(1, "https://github.com/owner/repo/pull/1"),
@@ -217,13 +215,9 @@ mod tests {
     #[test]
     fn test_filter_snoozed_keeps_only_snoozed() {
         let mut state = SnoozeState::new();
-        state.snooze("https://github.com/owner/repo/pull/1".to_string(), None);
-
         let future = Utc::now() + Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/3".to_string(),
-            Some(future),
-        );
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), future);
+        state.snooze("https://github.com/owner/repo/pull/3".to_string(), future);
 
         let prs = vec![
             create_test_pr(1, "https://github.com/owner/repo/pull/1"),
@@ -288,7 +282,10 @@ mod tests {
     #[test]
     fn partition_manual_snooze_wins_over_suppression() {
         let mut state = SnoozeState::new();
-        state.snooze("https://github.com/o/r/pull/1".to_string(), None);
+        state.snooze(
+            "https://github.com/o/r/pull/1".to_string(),
+            Utc::now() + Duration::days(365),
+        );
 
         let prs = vec![reviewed_pr(1, "https://github.com/o/r/pull/1", 3)];
         let result = partition_prs(prs, &state, Some(&full_policy()), Utc::now());

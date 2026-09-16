@@ -12,40 +12,36 @@ pub struct SnoozeState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnoozeEntry {
     pub snoozed_at: DateTime<Utc>,
-    pub snooze_until: Option<DateTime<Utc>>,
+    /// When the PR wakes. A snooze always wakes; permanent hiding is an
+    /// ignore (see `crate::ignore`).
+    pub snooze_until: DateTime<Utc>,
 }
 
 impl SnoozeEntry {
     /// Format the remaining time until snooze expires in human-friendly form
-    /// Returns "indefinite" for indefinite snoozes, "{N}h left" style for timed snoozes
+    /// ("{N}h left" style, or "expired")
     pub fn format_remaining(&self) -> String {
-        match self.snooze_until {
-            None => "indefinite".to_string(),
-            Some(until) => {
-                let now = Utc::now();
-                if until <= now {
-                    "expired".to_string()
-                } else {
-                    let duration = until - now;
-                    let hours = duration.num_hours();
-                    let days = duration.num_days();
-                    let weeks = days / 7;
+        let now = Utc::now();
+        if self.snooze_until <= now {
+            return "expired".to_string();
+        }
+        let duration = self.snooze_until - now;
+        let hours = duration.num_hours();
+        let days = duration.num_days();
+        let weeks = days / 7;
 
-                    if weeks >= 1 {
-                        format!("{}w left", weeks)
-                    } else if days >= 1 {
-                        format!("{}d left", days)
-                    } else if hours >= 1 {
-                        format!("{}h left", hours)
-                    } else {
-                        let minutes = duration.num_minutes();
-                        if minutes >= 1 {
-                            format!("{}m left", minutes)
-                        } else {
-                            "<1m left".to_string()
-                        }
-                    }
-                }
+        if weeks >= 1 {
+            format!("{}w left", weeks)
+        } else if days >= 1 {
+            format!("{}d left", days)
+        } else if hours >= 1 {
+            format!("{}h left", hours)
+        } else {
+            let minutes = duration.num_minutes();
+            if minutes >= 1 {
+                format!("{}m left", minutes)
+            } else {
+                "<1m left".to_string()
             }
         }
     }
@@ -66,20 +62,15 @@ impl SnoozeState {
         }
     }
 
-    /// Check if a PR is currently snoozed (either indefinite or not yet expired)
+    /// Check if a PR is currently snoozed (not yet expired)
     pub fn is_snoozed(&self, pr_url: &str) -> bool {
-        if let Some(entry) = self.snoozed.get(pr_url) {
-            match entry.snooze_until {
-                None => true,                      // Indefinite snooze
-                Some(until) => Utc::now() < until, // Check if not expired
-            }
-        } else {
-            false
-        }
+        self.snoozed
+            .get(pr_url)
+            .is_some_and(|entry| Utc::now() < entry.snooze_until)
     }
 
-    /// Snooze a PR with an optional expiry time
-    pub fn snooze(&mut self, pr_url: String, until: Option<DateTime<Utc>>) {
+    /// Snooze a PR until `until`
+    pub fn snooze(&mut self, pr_url: String, until: DateTime<Utc>) {
         let entry = SnoozeEntry {
             snoozed_at: Utc::now(),
             snooze_until: until,
@@ -96,12 +87,7 @@ impl SnoozeState {
     /// Remove expired snooze entries
     pub fn clean_expired(&mut self) {
         let now = Utc::now();
-        self.snoozed.retain(|_url, entry| {
-            match entry.snooze_until {
-                None => true,               // Keep indefinite snoozes
-                Some(until) => now < until, // Keep if not expired
-            }
-        });
+        self.snoozed.retain(|_url, entry| now < entry.snooze_until);
     }
 
     /// Get a reference to all snoozed entries (for listing snoozed PRs)
@@ -123,20 +109,10 @@ mod tests {
     }
 
     #[test]
-    fn test_snooze_indefinite() {
-        let mut state = SnoozeState::new();
-        state.snooze("https://github.com/owner/repo/pull/1".to_string(), None);
-        assert!(state.is_snoozed("https://github.com/owner/repo/pull/1"));
-    }
-
-    #[test]
     fn test_snooze_with_future_time() {
         let mut state = SnoozeState::new();
         let future = Utc::now() + Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/1".to_string(),
-            Some(future),
-        );
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), future);
         assert!(state.is_snoozed("https://github.com/owner/repo/pull/1"));
     }
 
@@ -144,17 +120,15 @@ mod tests {
     fn test_snooze_expired() {
         let mut state = SnoozeState::new();
         let past = Utc::now() - Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/1".to_string(),
-            Some(past),
-        );
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), past);
         assert!(!state.is_snoozed("https://github.com/owner/repo/pull/1"));
     }
 
     #[test]
     fn test_unsnooze() {
         let mut state = SnoozeState::new();
-        state.snooze("https://github.com/owner/repo/pull/1".to_string(), None);
+        let future = Utc::now() + Duration::hours(1);
+        state.snooze("https://github.com/owner/repo/pull/1".to_string(), future);
         assert!(state.unsnooze("https://github.com/owner/repo/pull/1"));
         assert!(!state.is_snoozed("https://github.com/owner/repo/pull/1"));
     }
@@ -169,40 +143,21 @@ mod tests {
     fn test_clean_expired() {
         let mut state = SnoozeState::new();
 
-        // Add indefinite snooze (should be kept)
-        state.snooze("https://github.com/owner/repo/pull/1".to_string(), None);
-
-        // Add future snooze (should be kept)
+        // Future snooze (should be kept)
         let future = Utc::now() + Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/2".to_string(),
-            Some(future),
-        );
+        state.snooze("https://github.com/owner/repo/pull/2".to_string(), future);
 
-        // Add expired snooze (should be removed)
+        // Expired snooze (should be removed)
         let past = Utc::now() - Duration::hours(1);
-        state.snooze(
-            "https://github.com/owner/repo/pull/3".to_string(),
-            Some(past),
-        );
+        state.snooze("https://github.com/owner/repo/pull/3".to_string(), past);
 
-        assert_eq!(state.snoozed.len(), 3);
+        assert_eq!(state.snoozed.len(), 2);
 
         state.clean_expired();
 
-        assert_eq!(state.snoozed.len(), 2);
-        assert!(state.is_snoozed("https://github.com/owner/repo/pull/1"));
+        assert_eq!(state.snoozed.len(), 1);
         assert!(state.is_snoozed("https://github.com/owner/repo/pull/2"));
         assert!(!state.is_snoozed("https://github.com/owner/repo/pull/3"));
-    }
-
-    #[test]
-    fn test_format_remaining_indefinite() {
-        let entry = SnoozeEntry {
-            snoozed_at: Utc::now(),
-            snooze_until: None,
-        };
-        assert_eq!(entry.format_remaining(), "indefinite");
     }
 
     #[test]
@@ -210,7 +165,7 @@ mod tests {
         let future = Utc::now() + Duration::hours(3);
         let entry = SnoozeEntry {
             snoozed_at: Utc::now(),
-            snooze_until: Some(future),
+            snooze_until: future,
         };
         let result = entry.format_remaining();
         // Should be something like "2h left" or "3h left" (timing may vary slightly)
@@ -226,7 +181,7 @@ mod tests {
         let past = Utc::now() - Duration::hours(1);
         let entry = SnoozeEntry {
             snoozed_at: Utc::now() - Duration::hours(2),
-            snooze_until: Some(past),
+            snooze_until: past,
         };
         assert_eq!(entry.format_remaining(), "expired");
     }
@@ -236,7 +191,7 @@ mod tests {
         let future = Utc::now() + Duration::days(3);
         let entry = SnoozeEntry {
             snoozed_at: Utc::now(),
-            snooze_until: Some(future),
+            snooze_until: future,
         };
         let result = entry.format_remaining();
         assert!(
@@ -251,7 +206,7 @@ mod tests {
         let future = Utc::now() + Duration::weeks(2);
         let entry = SnoozeEntry {
             snoozed_at: Utc::now(),
-            snooze_until: Some(future),
+            snooze_until: future,
         };
         let result = entry.format_remaining();
         assert!(

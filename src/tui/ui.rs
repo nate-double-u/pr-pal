@@ -469,15 +469,16 @@ fn render_snooze_popup(frame: &mut Frame, app: &App) {
     let input = Paragraph::new(input_line);
     frame.render_widget(input, chunks[0]);
 
-    // Render live duration preview
+    // Render live duration preview. Empty is not an error yet, just a
+    // prompt: a snooze needs a wake time (permanent hiding is `i`).
     let parse_result = if app.snooze_input.trim().is_empty() {
-        None // Not an error, just empty = indefinite
+        None
     } else {
         Some(humantime::parse_duration(app.snooze_input.trim()))
     };
 
     let preview_text = match &parse_result {
-        None => "indefinite".to_string(),
+        None => "e.g. 2h, 3d, 1w (i to ignore)".to_string(),
         Some(Ok(d)) => humantime::format_duration(*d).to_string(),
         Some(Err(_)) => "invalid duration".to_string(),
     };
@@ -496,7 +497,7 @@ fn render_snooze_popup(frame: &mut Frame, app: &App) {
 
     // Render end time preview
     let end_time_text = match &parse_result {
-        None => "Ends: never".to_string(),
+        None => String::new(),
         Some(Ok(d)) => {
             let now = Local::now();
             let end = now + chrono::Duration::from_std(*d).unwrap_or_default();

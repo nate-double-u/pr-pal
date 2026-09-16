@@ -28,8 +28,8 @@ enum Commands {
     Snooze {
         /// Index number of the PR to snooze (1-based, as shown in list)
         index: usize,
-        /// Duration to snooze (e.g., "2h", "3d", "1w"). Omit for indefinite.
-        #[arg(long, value_name = "DURATION")]
+        /// How long to snooze (e.g., "2h", "3d", "1w"). To hide a PR for good, use `ignore`.
+        #[arg(long, value_name = "DURATION", required = true)]
         r#for: Option<String>,
     },
     /// Unsnooze a PR by its index in the snoozed list
@@ -228,13 +228,16 @@ async fn main() {
         std::process::exit(EXIT_CONFIG);
     }
 
-    // Load snooze state (before credential setup - no network required)
-    let snooze_path = pr_pal::snooze::get_snooze_path();
-    let mut snooze_state = match pr_pal::snooze::load_snooze_state(&snooze_path) {
-        Ok(s) => s,
+    // Load hide state (before credential setup - no network required)
+    let hide_paths = pr_pal::hide::HidePaths::default_paths();
+    let (mut snooze_state, ignore_state) = match pr_pal::hide::load_hide_state(&hide_paths) {
+        Ok(state) => state,
         Err(e) => {
-            eprintln!("Warning: Could not load snooze state: {}", e);
-            pr_pal::snooze::SnoozeState::new()
+            eprintln!("Warning: Could not load snooze/ignore state: {}", e);
+            (
+                pr_pal::snooze::SnoozeState::new(),
+                pr_pal::ignore::IgnoreState::new(),
+            )
         }
     };
     // Clean expired snoozes on load
@@ -335,7 +338,8 @@ async fn main() {
         // Create App in loading state (empty PR lists)
         let app = pr_pal::tui::App::new_loading(
             snooze_state,
-            snooze_path,
+            ignore_state,
+            hide_paths,
             config,
             cache_config,
             cache_handle,
@@ -525,35 +529,33 @@ async fn main() {
             }
 
             let (pr, _) = &scored_prs[index - 1];
-            let snooze_until = if let Some(dur_str) = duration {
-                let std_duration = humantime::parse_duration(&dur_str).unwrap_or_else(|_| {
-                    eprintln!(
-                        "Invalid duration '{}'. Use formats like: 2h, 3d, 1w",
-                        dur_str
-                    );
-                    std::process::exit(EXIT_CONFIG);
-                });
-                let chrono_duration =
-                    chrono::Duration::from_std(std_duration).unwrap_or_else(|_| {
-                        eprintln!("Duration '{}' is too large.", dur_str);
-                        std::process::exit(EXIT_CONFIG);
-                    });
-                Some(chrono::Utc::now() + chrono_duration)
-            } else {
-                None
-            };
+            let dur_str = duration.expect("clap enforces --for");
+            let std_duration = humantime::parse_duration(&dur_str).unwrap_or_else(|_| {
+                eprintln!(
+                    "Invalid duration '{}'. Use formats like: 2h, 3d, 1w",
+                    dur_str
+                );
+                std::process::exit(EXIT_CONFIG);
+            });
+            let chrono_duration = chrono::Duration::from_std(std_duration).unwrap_or_else(|_| {
+                eprintln!("Duration '{}' is too large.", dur_str);
+                std::process::exit(EXIT_CONFIG);
+            });
+            let snooze_until = chrono::Utc::now() + chrono_duration;
 
             snooze_state.snooze(pr.url.clone(), snooze_until);
-            if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+            if let Err(e) = pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+            {
                 eprintln!("Failed to save snooze state: {}", e);
                 std::process::exit(EXIT_CONFIG);
             }
 
-            let duration_msg = match snooze_until {
-                Some(until) => format!(" until {}", until.format("%Y-%m-%d %H:%M UTC")),
-                None => " indefinitely".to_string(),
-            };
-            println!("Snoozed PR #{}{}: {}", pr.number, duration_msg, pr.title);
+            println!(
+                "Snoozed PR #{} until {}: {}",
+                pr.number,
+                snooze_until.format("%Y-%m-%d %H:%M UTC"),
+                pr.title
+            );
         }
         Commands::Unsnooze { index } => {
             if scored_prs.is_empty() {
@@ -572,7 +574,9 @@ async fn main() {
             let (pr, _) = &scored_prs[index - 1];
             let removed = snooze_state.unsnooze(&pr.url);
             if removed {
-                if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+                if let Err(e) =
+                    pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+                {
                     eprintln!("Failed to save snooze state: {}", e);
                     std::process::exit(EXIT_CONFIG);
                 }
@@ -598,5 +602,14 @@ mod tests {
     fn no_version_check_flag_is_accepted() {
         use clap::Parser;
         assert!(Cli::try_parse_from(["pr-pal", "--no-version-check"]).is_ok());
+    }
+
+    // Snooze means "wake me later", so a duration is mandatory. Permanent
+    // hiding is `ignore`, not an open-ended snooze.
+    #[test]
+    fn snooze_requires_a_duration() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "snooze", "1"]).is_err());
+        assert!(Cli::try_parse_from(["pr-pal", "snooze", "1", "--for", "2d"]).is_ok());
     }
 }
