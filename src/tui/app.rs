@@ -512,11 +512,10 @@ impl App {
         // Apply snooze. A PR is in one hide list at a time, so snoozing an
         // ignored row (s in the Ignored view) drops the ignore.
         let was_ignored_at = self.ignored_at(&url);
-        self.ignore_state.unignore(&url);
-        self.snooze_state.snooze(url.clone(), computed_until);
-
-        // Save to disk
-        if !self.persist() {
+        if !self.commit(|snooze, ignore| {
+            ignore.unignore(&url);
+            snooze.snooze(url.clone(), computed_until);
+        }) {
             self.input_mode = InputMode::Normal;
             return;
         }
@@ -611,8 +610,9 @@ impl App {
             return;
         };
 
-        self.ignore_state.unignore(&url);
-        if !self.persist() {
+        if !self.commit(|_, ignore| {
+            ignore.unignore(&url);
+        }) {
             return;
         }
 
@@ -666,11 +666,9 @@ impl App {
             return;
         }
 
-        // Unsnooze
-        self.snooze_state.unsnooze(&url);
-
-        // Save to disk
-        if !self.persist() {
+        if !self.commit(|snooze, _| {
+            snooze.unsnooze(&url);
+        }) {
             return;
         }
 
@@ -744,9 +742,10 @@ impl App {
             _ => PreIgnore::Active,
         };
 
-        self.snooze_state.unsnooze(&url);
-        self.ignore_state.ignore(url.clone(), Utc::now());
-        if !self.persist() {
+        if !self.commit(|snooze, ignore| {
+            snooze.unsnooze(&url);
+            ignore.ignore(url.clone(), Utc::now());
+        }) {
             return;
         }
 
@@ -778,13 +777,12 @@ impl App {
                 was_ignored_at,
             } => {
                 // Undo a snooze: unsnooze the PR, restoring an ignore it replaced
-                self.snooze_state.unsnooze(&url);
-                if let Some(at) = was_ignored_at {
-                    self.ignore_state.ignore(url.clone(), at);
-                }
-
-                // Save to disk
-                if !self.persist() {
+                if !self.commit(|snooze, ignore| {
+                    snooze.unsnooze(&url);
+                    if let Some(at) = was_ignored_at {
+                        ignore.ignore(url.clone(), at);
+                    }
+                }) {
                     return;
                 }
 
@@ -812,12 +810,11 @@ impl App {
                 became_suppressed,
             } => {
                 // Undo an unsnooze: restore the removed snooze, if there was one
-                if let Some(until) = until {
-                    self.snooze_state.snooze(url.clone(), until);
-                }
-
-                // Save to disk
-                if !self.persist() {
+                if !self.commit(|snooze, _| {
+                    if let Some(until) = until {
+                        snooze.snooze(url.clone(), until);
+                    }
+                }) {
                     return;
                 }
 
@@ -837,10 +834,7 @@ impl App {
                 previous_until,
             } => {
                 // Undo a re-snooze: restore the previous snooze duration
-                self.snooze_state.snooze(url.clone(), previous_until);
-
-                // Save to disk
-                if !self.persist() {
+                if !self.commit(|snooze, _| snooze.snooze(url.clone(), previous_until)) {
                     return;
                 }
 
@@ -848,11 +842,12 @@ impl App {
                 self.show_flash(format!("Undid re-snooze: {}", title));
             }
             UndoAction::Ignored { url, title, before } => {
-                self.ignore_state.unignore(&url);
-                if let PreIgnore::Snoozed { until } = before {
-                    self.snooze_state.snooze(url.clone(), until);
-                }
-                if !self.persist() {
+                if !self.commit(|snooze, ignore| {
+                    ignore.unignore(&url);
+                    if let PreIgnore::Snoozed { until } = before {
+                        snooze.snooze(url.clone(), until);
+                    }
+                }) {
                     return;
                 }
 
@@ -881,8 +876,7 @@ impl App {
                 ignored_at,
                 became_suppressed,
             } => {
-                self.ignore_state.ignore(url.clone(), ignored_at);
-                if !self.persist() {
+                if !self.commit(|_, ignore| ignore.ignore(url.clone(), ignored_at)) {
                     return;
                 }
                 if became_suppressed {
@@ -894,9 +888,11 @@ impl App {
         }
     }
 
-    /// Write both hide files. On failure, flash the error and return false
-    /// so the caller can abort before touching the in-memory lists.
-    fn persist(&mut self) -> bool {
+    /// Apply `mutate` to the hide state and write both files. On failure,
+    /// flash the error and return false so the caller can abort before
+    /// touching the in-memory lists.
+    fn commit(&mut self, mutate: impl FnOnce(&mut SnoozeState, &mut IgnoreState)) -> bool {
+        mutate(&mut self.snooze_state, &mut self.ignore_state);
         match crate::hide::save_hide_state(&self.hide_paths, &self.snooze_state, &self.ignore_state)
         {
             Ok(()) => true,
