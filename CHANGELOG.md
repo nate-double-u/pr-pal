@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [compare](https://github.com/nate-double-u/pr-pal/compare/v1.0.0...HEAD)
 
+### Added
+
+- Ignore: hide a PR for good with `i` (TUI) or `ignore INDEX` (CLI); restore with `u` or `unignore INDEX`. Ignored PRs get their own tab, oldest first, and `list --show-ignored`
+- `Shift-Tab` cycles views backwards
+- `~/.config/pr-pal/ignore.json` stores ignores; `snooze.json` keeps the PR Bro format
+
+### Changed
+
+- `snooze` requires `--for DURATION`; a snooze always wakes (breaking)
+- Legacy indefinite snoozes (`snooze_until: null`) load as ignores and move to `ignore.json` on the next save
+
+### Removed
+
+- Indefinite snooze (breaking; use ignore)
+
 ## 1.0.0 - 2026-09-15
 
 [compare](https://github.com/nate-double-u/pr-pal/compare/v0.5.1...v1.0.0)
