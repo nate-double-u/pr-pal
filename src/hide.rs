@@ -12,8 +12,8 @@
 
 use crate::github::types::PullRequest;
 use crate::ignore::{IgnoreEntry, IgnoreState};
-use crate::snooze::{partition_prs, SnoozeState, SuppressPolicy};
-use anyhow::Result;
+use crate::snooze::{partition_prs, LoadedSnooze, SnoozeState, SuppressPolicy};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 
@@ -74,13 +74,38 @@ impl HidePaths {
     }
 }
 
-/// Load both files. Missing files are empty states. Legacy indefinite
-/// snoozes become ignores (ignored when they were snoozed); a URL present
-/// in both files resolves to ignored, the stronger hide.
-pub fn load_hide_state(paths: &HidePaths) -> Result<(SnoozeState, IgnoreState)> {
-    let loaded = crate::snooze::load_snooze_file(&paths.snooze)?;
+/// Both hide files, each loaded on its own. A file that fails to load is
+/// reported in `errors` and its state left empty; the other file keeps its
+/// contents, so one bad file cannot hide (or, on the next save, erase) the
+/// other's entries.
+pub struct LoadedHideState {
+    pub snooze: SnoozeState,
+    pub ignore: IgnoreState,
+    pub errors: Vec<anyhow::Error>,
+}
+
+/// Load each file independently. Missing files are empty states. Legacy
+/// indefinite snoozes become ignores (ignored when they were snoozed); a
+/// URL present in both files resolves to ignored, the stronger hide.
+pub fn load_hide_files(paths: &HidePaths) -> LoadedHideState {
+    let mut errors = Vec::new();
+
+    let loaded = crate::snooze::load_snooze_file(&paths.snooze)
+        .with_context(|| format!("Could not load {}", paths.snooze.display()))
+        .unwrap_or_else(|e| {
+            errors.push(e);
+            LoadedSnooze {
+                state: SnoozeState::new(),
+                legacy_indefinite: Vec::new(),
+            }
+        });
     let mut snooze = loaded.state;
-    let mut ignore = crate::ignore::load_ignore_state(&paths.ignore)?;
+    let mut ignore = crate::ignore::load_ignore_state(&paths.ignore)
+        .with_context(|| format!("Could not load {}", paths.ignore.display()))
+        .unwrap_or_else(|e| {
+            errors.push(e);
+            IgnoreState::new()
+        });
 
     for (url, snoozed_at) in loaded.legacy_indefinite {
         // Keep the newer ignore.json timestamp if the URL is already there.
@@ -90,7 +115,22 @@ pub fn load_hide_state(paths: &HidePaths) -> Result<(SnoozeState, IgnoreState)> 
     }
     snooze.snoozed.retain(|url, _| !ignore.is_ignored(url));
 
-    Ok((snooze, ignore))
+    LoadedHideState {
+        snooze,
+        ignore,
+        errors,
+    }
+}
+
+/// Load both files, all or nothing: the first file error fails the load.
+/// For callers that already hold a consistent state and would rather keep
+/// it than adopt a partial one.
+pub fn load_hide_state(paths: &HidePaths) -> Result<(SnoozeState, IgnoreState)> {
+    let loaded = load_hide_files(paths);
+    match loaded.errors.into_iter().next() {
+        Some(e) => Err(e),
+        None => Ok((loaded.snooze, loaded.ignore)),
+    }
 }
 
 /// Save both files. The ignore file goes first so a crash between the two
@@ -258,6 +298,66 @@ mod tests {
         let paths = temp_paths("bad-version");
         fs::write(&paths.ignore, r#"{"version": 99, "ignored": {}}"#).unwrap();
         assert!(load_hide_state(&paths).is_err());
+    }
+
+    // LOCKED: regression for #8 review (a bad ignore.json discarded a good snooze.json)
+    // Startup loads each file on its own: a broken file is reported and
+    // left empty, the other keeps its contents.
+    #[test]
+    fn broken_ignore_file_keeps_snooze_state() {
+        let paths = temp_paths("broken-ignore");
+        fs::write(&paths.snooze, legacy_snooze_json()).unwrap();
+        fs::write(&paths.ignore, "{ not json").unwrap();
+
+        let loaded = load_hide_files(&paths);
+
+        assert!(
+            loaded.snooze.snoozed.contains_key(URL_B),
+            "timed snooze survives"
+        );
+        assert!(
+            loaded.ignore.is_ignored(URL_A),
+            "legacy null still converts"
+        );
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(
+            loaded.errors[0].to_string().contains("ignore.json"),
+            "names the file: {}",
+            loaded.errors[0]
+        );
+    }
+
+    // LOCKED: regression for #8 review (a bad ignore.json discarded a good snooze.json)
+    #[test]
+    fn broken_snooze_file_keeps_ignore_state() {
+        let paths = temp_paths("broken-snooze");
+        fs::write(&paths.snooze, "{ not json").unwrap();
+        let mut ignore = IgnoreState::new();
+        ignore.ignore(URL_A.to_string(), ts("2026-03-01T10:00:00Z"));
+        crate::ignore::save_ignore_state(&paths.ignore, &ignore).unwrap();
+
+        let loaded = load_hide_files(&paths);
+
+        assert!(loaded.ignore.is_ignored(URL_A), "ignore survives");
+        assert!(loaded.snooze.snoozed.is_empty());
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(
+            loaded.errors[0].to_string().contains("snooze.json"),
+            "names the file: {}",
+            loaded.errors[0]
+        );
+    }
+
+    #[test]
+    fn clean_files_load_without_errors() {
+        let paths = temp_paths("clean-files");
+        fs::write(&paths.snooze, legacy_snooze_json()).unwrap();
+
+        let loaded = load_hide_files(&paths);
+
+        assert!(loaded.errors.is_empty());
+        assert!(loaded.ignore.is_ignored(URL_A));
+        assert!(loaded.snooze.snoozed.contains_key(URL_B));
     }
 
     // --- partition_hidden ---

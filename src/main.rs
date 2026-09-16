@@ -242,18 +242,18 @@ async fn main() {
         std::process::exit(EXIT_CONFIG);
     }
 
-    // Load hide state (before credential setup - no network required)
+    // Load hide state (before credential setup - no network required).
+    // Each file loads on its own, so a broken ignore.json cannot blank a
+    // good snooze.json (or vice versa).
     let hide_paths = pr_pal::hide::HidePaths::default_paths();
-    let (mut snooze_state, mut ignore_state) = match pr_pal::hide::load_hide_state(&hide_paths) {
-        Ok(state) => state,
-        Err(e) => {
-            eprintln!("Warning: Could not load snooze/ignore state: {}", e);
-            (
-                pr_pal::snooze::SnoozeState::new(),
-                pr_pal::ignore::IgnoreState::new(),
-            )
-        }
-    };
+    let loaded = pr_pal::hide::load_hide_files(&hide_paths);
+    for e in &loaded.errors {
+        eprintln!(
+            "Warning: {:#}. Starting without it; the next save overwrites it.",
+            e
+        );
+    }
+    let (mut snooze_state, mut ignore_state) = (loaded.snooze, loaded.ignore);
     // Clean expired snoozes on load
     snooze_state.clean_expired();
 
