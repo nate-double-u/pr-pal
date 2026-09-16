@@ -888,14 +888,20 @@ impl App {
         }
     }
 
-    /// Apply `mutate` to the hide state and write both files. On failure,
-    /// flash the error and return false so the caller can abort before
-    /// touching the in-memory lists.
+    /// Apply `mutate` to a copy of the hide state, write both files, and
+    /// adopt the copy only if the write succeeds. A failed save flashes the
+    /// error and leaves memory matching disk, so the action can simply be
+    /// retried; the caller aborts before touching the in-memory lists.
     fn commit(&mut self, mutate: impl FnOnce(&mut SnoozeState, &mut IgnoreState)) -> bool {
-        mutate(&mut self.snooze_state, &mut self.ignore_state);
-        match crate::hide::save_hide_state(&self.hide_paths, &self.snooze_state, &self.ignore_state)
-        {
-            Ok(()) => true,
+        let mut snooze = self.snooze_state.clone();
+        let mut ignore = self.ignore_state.clone();
+        mutate(&mut snooze, &mut ignore);
+        match crate::hide::save_hide_state(&self.hide_paths, &snooze, &ignore) {
+            Ok(()) => {
+                self.snooze_state = snooze;
+                self.ignore_state = ignore;
+                true
+            }
             Err(e) => {
                 self.show_flash(format!("Failed to save hide state: {}", e));
                 false
@@ -1673,12 +1679,17 @@ mod ignore_tests {
         )
     }
 
-    fn test_app(name: &str) -> App {
-        let dir = std::env::temp_dir().join(format!(
+    /// Where `test_app(name)` writes its hide files.
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
             "pr-pal-ignore-test-{}-{}",
             std::process::id(),
             name
-        ));
+        ))
+    }
+
+    fn test_app(name: &str) -> App {
+        let dir = test_dir(name);
         App::new(
             Vec::new(),
             Vec::new(),
@@ -2099,5 +2110,82 @@ mod ignore_tests {
         }
 
         assert_eq!(app.snooze_input, "1w 2d");
+    }
+
+    // --- failed saves ---
+
+    /// Make every save under `name` fail by putting a plain file where the
+    /// hide directory should be. Returns the path so the test can undo it.
+    fn block_saves(name: &str) -> std::path::PathBuf {
+        let dir = test_dir(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, b"not a directory").unwrap();
+        dir
+    }
+
+    // LOCKED: regression for #8 review (failed save left memory ahead of disk; `u` then no-op)
+    #[test]
+    fn failed_unignore_save_keeps_state_and_retry_succeeds() {
+        let name = "unignore-save-fails";
+        let url = "https://x/ignored";
+        let mut app = app_with_ignored_row(name, url, 3);
+        let blocker = block_saves(name);
+
+        app.unignore_selected();
+
+        assert!(
+            flash(&app).starts_with("Failed to save"),
+            "got {:?}",
+            flash(&app)
+        );
+        assert!(app.ignore_state.is_ignored(url), "memory matches disk");
+        assert_eq!(urls(&app.ignored_prs), vec![url], "row stays put");
+        assert!(app.undo_stack.is_empty(), "nothing to undo");
+
+        std::fs::remove_file(&blocker).unwrap();
+        app.unignore_selected();
+
+        assert!(!app.ignore_state.is_ignored(url));
+        assert!(app.ignored_prs.is_empty());
+        assert_eq!(urls(&app.active_prs), vec![url]);
+        assert!(
+            flash(&app).starts_with("Unignored:"),
+            "got {:?}",
+            flash(&app)
+        );
+        let _ = std::fs::remove_dir_all(test_dir(name));
+    }
+
+    // LOCKED: regression for #8 review (failed save left memory ahead of disk; `u` then no-op)
+    #[test]
+    fn failed_ignore_save_keeps_existing_snooze() {
+        let name = "ignore-save-fails";
+        let url = "https://x/snoozed";
+        let until = Utc::now() + Duration::hours(2);
+        let mut app = test_app(name);
+        app.snoozed_prs = vec![scored(url, 1.0)];
+        app.snooze_state.snooze(url.to_string(), until);
+        app.current_view = View::Snoozed;
+        app.table_state.select(Some(0));
+        let blocker = block_saves(name);
+
+        app.ignore_selected();
+
+        assert!(
+            flash(&app).starts_with("Failed to save"),
+            "got {:?}",
+            flash(&app)
+        );
+        assert!(!app.ignore_state.is_ignored(url), "ignore not applied");
+        assert!(app.snooze_state.is_snoozed(url), "snooze survives");
+        assert_eq!(
+            app.snooze_state.snoozed_entries()[url].snooze_until,
+            until,
+            "snooze wake time untouched"
+        );
+        assert_eq!(urls(&app.snoozed_prs), vec![url], "row stays put");
+        assert!(app.undo_stack.is_empty());
+
+        let _ = std::fs::remove_file(&blocker);
     }
 }
