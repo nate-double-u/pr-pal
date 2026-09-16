@@ -18,6 +18,9 @@ enum Commands {
         /// Show snoozed PRs instead of active PRs
         #[arg(long)]
         show_snoozed: bool,
+        /// Show ignored PRs instead of active PRs (oldest ignore first)
+        #[arg(long, conflicts_with = "show_snoozed")]
+        show_ignored: bool,
     },
     /// Open a PR in browser by its index number
     Open {
@@ -35,6 +38,16 @@ enum Commands {
     /// Unsnooze a PR by its index in the snoozed list
     Unsnooze {
         /// Index number of the snoozed PR to unsnooze (1-based, as shown in --show-snoozed list)
+        index: usize,
+    },
+    /// Ignore a PR by its index number: hide it for good, until unignored
+    Ignore {
+        /// Index number of the PR to ignore (1-based, as shown in list)
+        index: usize,
+    },
+    /// Unignore a PR by its index in the ignored list
+    Unignore {
+        /// Index number of the ignored PR to unignore (1-based, as shown in --show-ignored list)
         index: usize,
     },
     /// Initialize a new config file with an interactive wizard
@@ -89,6 +102,7 @@ async fn main() {
     let config_path_str = cli.config.clone();
     let command = cli.command.unwrap_or(Commands::List {
         show_snoozed: false,
+        show_ignored: false,
     });
     let start_time = Instant::now();
 
@@ -230,7 +244,7 @@ async fn main() {
 
     // Load hide state (before credential setup - no network required)
     let hide_paths = pr_pal::hide::HidePaths::default_paths();
-    let (mut snooze_state, ignore_state) = match pr_pal::hide::load_hide_state(&hide_paths) {
+    let (mut snooze_state, mut ignore_state) = match pr_pal::hide::load_hide_state(&hide_paths) {
         Ok(state) => state,
         Err(e) => {
             eprintln!("Warning: Could not load snooze/ignore state: {}", e);
@@ -327,7 +341,8 @@ async fn main() {
         && matches!(
             command,
             Commands::List {
-                show_snoozed: false
+                show_snoozed: false,
+                show_ignored: false,
             }
         )
     {
@@ -430,13 +445,21 @@ async fn main() {
         // Snoozed view includes suppressed PRs (awaiting author) so nothing
         // hidden from Active is invisible. Unsnooze must index the exact
         // same list the user saw in `list --show-snoozed`.
-        Commands::List { show_snoozed: true } | Commands::Unsnooze { .. } => fetched.snoozed_view(),
+        Commands::List {
+            show_snoozed: true, ..
+        }
+        | Commands::Unsnooze { .. } => fetched.snoozed_view(),
+        // Likewise unignore indexes the list shown by `list --show-ignored`.
+        Commands::List {
+            show_ignored: true, ..
+        }
+        | Commands::Unignore { .. } => fetched.ignored,
         _ => fetched.active,
     };
 
     // Route based on subcommand
     match command {
-        Commands::List { show_snoozed: _ } => {
+        Commands::List { .. } => {
             // Build ScoredPr references for formatter
             let scored_refs: Vec<pr_pal::output::ScoredPr> = scored_prs
                 .iter()
@@ -543,6 +566,32 @@ async fn main() {
                 eprintln!("PR #{} was not snoozed.", pr.number);
             }
         }
+        Commands::Ignore { index } => {
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "ignore");
+            // One hide list per PR: an ignore replaces any snooze entry
+            snooze_state.unsnooze(&pr.url);
+            ignore_state.ignore(pr.url.clone(), chrono::Utc::now());
+            if let Err(e) = pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+            {
+                eprintln!("Failed to save ignore state: {}", e);
+                std::process::exit(EXIT_CONFIG);
+            }
+            println!("Ignored PR #{}: {}", pr.number, pr.title);
+        }
+        Commands::Unignore { index } => {
+            let pr = pr_at_index(&scored_prs, index, "ignored pull requests", "unignore");
+            if ignore_state.unignore(&pr.url) {
+                if let Err(e) =
+                    pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+                {
+                    eprintln!("Failed to save ignore state: {}", e);
+                    std::process::exit(EXIT_CONFIG);
+                }
+                println!("Unignored PR #{}: {}", pr.number, pr.title);
+            } else {
+                eprintln!("PR #{} was not ignored.", pr.number);
+            }
+        }
         Commands::Init => unreachable!("Init is handled before config loading"),
     }
 
@@ -595,5 +644,24 @@ mod tests {
         use clap::Parser;
         assert!(Cli::try_parse_from(["pr-pal", "snooze", "1"]).is_err());
         assert!(Cli::try_parse_from(["pr-pal", "snooze", "1", "--for", "2d"]).is_ok());
+    }
+
+    #[test]
+    fn ignore_and_unignore_take_an_index() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "ignore", "3"]).is_ok());
+        assert!(Cli::try_parse_from(["pr-pal", "unignore", "2"]).is_ok());
+        assert!(Cli::try_parse_from(["pr-pal", "ignore"]).is_err());
+        assert!(Cli::try_parse_from(["pr-pal", "unignore"]).is_err());
+    }
+
+    // One list at a time: the flags name which hidden list to show.
+    #[test]
+    fn show_ignored_conflicts_with_show_snoozed() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "list", "--show-ignored"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pr-pal", "list", "--show-snoozed", "--show-ignored"]).is_err()
+        );
     }
 }
