@@ -485,24 +485,7 @@ async fn main() {
             }
         }
         Commands::Open { index } => {
-            // Handle empty result case
-            if scored_prs.is_empty() {
-                eprintln!("No pull requests found. Nothing to open.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-
-            // Validate index bounds (1-based)
-            if index < 1 || index > scored_prs.len() {
-                eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
-                );
-                std::process::exit(EXIT_CONFIG);
-            }
-
-            // Get PR at index (convert to 0-based)
-            let (pr, _result) = &scored_prs[index - 1];
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "open");
 
             // Open in browser
             if let Err(e) = pr_pal::browser::open_url(&pr.url) {
@@ -516,20 +499,7 @@ async fn main() {
             index,
             r#for: duration,
         } => {
-            if scored_prs.is_empty() {
-                eprintln!("No pull requests found. Nothing to snooze.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-            if index < 1 || index > scored_prs.len() {
-                eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
-                );
-                std::process::exit(EXIT_CONFIG);
-            }
-
-            let (pr, _) = &scored_prs[index - 1];
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "snooze");
             let dur_str = duration.expect("clap enforces --for");
             let std_duration = humantime::parse_duration(&dur_str).unwrap_or_else(|_| {
                 eprintln!(
@@ -559,20 +529,7 @@ async fn main() {
             );
         }
         Commands::Unsnooze { index } => {
-            if scored_prs.is_empty() {
-                eprintln!("No snoozed pull requests found. Nothing to unsnooze.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-            if index < 1 || index > scored_prs.len() {
-                eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
-                );
-                std::process::exit(EXIT_CONFIG);
-            }
-
-            let (pr, _) = &scored_prs[index - 1];
+            let pr = pr_at_index(&scored_prs, index, "snoozed pull requests", "unsnooze");
             let removed = snooze_state.unsnooze(&pr.url);
             if removed {
                 if let Err(e) =
@@ -590,6 +547,32 @@ async fn main() {
     }
 
     std::process::exit(EXIT_SUCCESS);
+}
+
+/// The PR at a 1-based index from `list`, or exit: success with a notice
+/// when the list is empty, config error when the index is out of range.
+fn pr_at_index<'a>(
+    scored_prs: &'a [(
+        pr_pal::github::types::PullRequest,
+        pr_pal::scoring::ScoreResult,
+    )],
+    index: usize,
+    list_name: &str,
+    verb: &str,
+) -> &'a pr_pal::github::types::PullRequest {
+    if scored_prs.is_empty() {
+        eprintln!("No {} found. Nothing to {}.", list_name, verb);
+        std::process::exit(EXIT_SUCCESS);
+    }
+    if index < 1 || index > scored_prs.len() {
+        eprintln!(
+            "Invalid index {}. Must be between 1 and {}.",
+            index,
+            scored_prs.len()
+        );
+        std::process::exit(EXIT_CONFIG);
+    }
+    &scored_prs[index - 1].0
 }
 
 #[cfg(test)]
