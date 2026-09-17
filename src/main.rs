@@ -18,6 +18,9 @@ enum Commands {
         /// Show snoozed PRs instead of active PRs
         #[arg(long)]
         show_snoozed: bool,
+        /// Show ignored PRs instead of active PRs (oldest ignore first)
+        #[arg(long, conflicts_with = "show_snoozed")]
+        show_ignored: bool,
     },
     /// Open a PR in browser by its index number
     Open {
@@ -28,13 +31,23 @@ enum Commands {
     Snooze {
         /// Index number of the PR to snooze (1-based, as shown in list)
         index: usize,
-        /// Duration to snooze (e.g., "2h", "3d", "1w"). Omit for indefinite.
-        #[arg(long, value_name = "DURATION")]
+        /// How long to snooze (e.g., "2h", "3d", "1w"). To hide a PR for good, use `ignore`.
+        #[arg(long, value_name = "DURATION", required = true)]
         r#for: Option<String>,
     },
     /// Unsnooze a PR by its index in the snoozed list
     Unsnooze {
         /// Index number of the snoozed PR to unsnooze (1-based, as shown in --show-snoozed list)
+        index: usize,
+    },
+    /// Ignore a PR by its index number: hide it for good, until unignored
+    Ignore {
+        /// Index number of the PR to ignore (1-based, as shown in list)
+        index: usize,
+    },
+    /// Unignore a PR by its index in the ignored list
+    Unignore {
+        /// Index number of the ignored PR to unignore (1-based, as shown in --show-ignored list)
         index: usize,
     },
     /// Initialize a new config file with an interactive wizard
@@ -89,6 +102,7 @@ async fn main() {
     let config_path_str = cli.config.clone();
     let command = cli.command.unwrap_or(Commands::List {
         show_snoozed: false,
+        show_ignored: false,
     });
     let start_time = Instant::now();
 
@@ -228,15 +242,18 @@ async fn main() {
         std::process::exit(EXIT_CONFIG);
     }
 
-    // Load snooze state (before credential setup - no network required)
-    let snooze_path = pr_pal::snooze::get_snooze_path();
-    let mut snooze_state = match pr_pal::snooze::load_snooze_state(&snooze_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Warning: Could not load snooze state: {}", e);
-            pr_pal::snooze::SnoozeState::new()
-        }
-    };
+    // Load hide state (before credential setup - no network required).
+    // Each file loads on its own, so a broken ignore.json cannot blank a
+    // good snooze.json (or vice versa).
+    let hide_paths = pr_pal::hide::HidePaths::default_paths();
+    let loaded = pr_pal::hide::load_hide_files(&hide_paths);
+    for e in &loaded.errors {
+        eprintln!(
+            "Warning: {:#}. Starting without it; the next save overwrites it.",
+            e
+        );
+    }
+    let (mut snooze_state, mut ignore_state) = (loaded.snooze, loaded.ignore);
     // Clean expired snoozes on load
     snooze_state.clean_expired();
 
@@ -324,7 +341,8 @@ async fn main() {
         && matches!(
             command,
             Commands::List {
-                show_snoozed: false
+                show_snoozed: false,
+                show_ignored: false,
             }
         )
     {
@@ -335,7 +353,8 @@ async fn main() {
         // Create App in loading state (empty PR lists)
         let app = pr_pal::tui::App::new_loading(
             snooze_state,
-            snooze_path,
+            ignore_state,
+            hide_paths,
             config,
             cache_config,
             cache_handle,
@@ -361,6 +380,7 @@ async fn main() {
             &current_client,
             &config,
             &snooze_state,
+            &ignore_state,
             &cache_config,
             cli.verbose,
             current_auth_username.as_deref(),
@@ -425,13 +445,21 @@ async fn main() {
         // Snoozed view includes suppressed PRs (awaiting author) so nothing
         // hidden from Active is invisible. Unsnooze must index the exact
         // same list the user saw in `list --show-snoozed`.
-        Commands::List { show_snoozed: true } | Commands::Unsnooze { .. } => fetched.snoozed_view(),
+        Commands::List {
+            show_snoozed: true, ..
+        }
+        | Commands::Unsnooze { .. } => fetched.snoozed_view(),
+        // Likewise unignore indexes the list shown by `list --show-ignored`.
+        Commands::List {
+            show_ignored: true, ..
+        }
+        | Commands::Unignore { .. } => fetched.ignored,
         _ => fetched.active,
     };
 
     // Route based on subcommand
     match command {
-        Commands::List { show_snoozed: _ } => {
+        Commands::List { .. } => {
             // Build ScoredPr references for formatter
             let scored_refs: Vec<pr_pal::output::ScoredPr> = scored_prs
                 .iter()
@@ -480,24 +508,7 @@ async fn main() {
             }
         }
         Commands::Open { index } => {
-            // Handle empty result case
-            if scored_prs.is_empty() {
-                eprintln!("No pull requests found. Nothing to open.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-
-            // Validate index bounds (1-based)
-            if index < 1 || index > scored_prs.len() {
-                eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
-                );
-                std::process::exit(EXIT_CONFIG);
-            }
-
-            // Get PR at index (convert to 0-based)
-            let (pr, _result) = &scored_prs[index - 1];
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "open");
 
             // Open in browser
             if let Err(e) = pr_pal::browser::open_url(&pr.url) {
@@ -511,68 +522,42 @@ async fn main() {
             index,
             r#for: duration,
         } => {
-            if scored_prs.is_empty() {
-                eprintln!("No pull requests found. Nothing to snooze.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-            if index < 1 || index > scored_prs.len() {
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "snooze");
+            let dur_str = duration.expect("clap enforces --for");
+            let std_duration = humantime::parse_duration(&dur_str).unwrap_or_else(|_| {
                 eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
+                    "Invalid duration '{}'. Use formats like: 2h, 3d, 1w",
+                    dur_str
                 );
                 std::process::exit(EXIT_CONFIG);
-            }
-
-            let (pr, _) = &scored_prs[index - 1];
-            let snooze_until = if let Some(dur_str) = duration {
-                let std_duration = humantime::parse_duration(&dur_str).unwrap_or_else(|_| {
-                    eprintln!(
-                        "Invalid duration '{}'. Use formats like: 2h, 3d, 1w",
-                        dur_str
-                    );
-                    std::process::exit(EXIT_CONFIG);
-                });
-                let chrono_duration =
-                    chrono::Duration::from_std(std_duration).unwrap_or_else(|_| {
-                        eprintln!("Duration '{}' is too large.", dur_str);
-                        std::process::exit(EXIT_CONFIG);
-                    });
-                Some(chrono::Utc::now() + chrono_duration)
-            } else {
-                None
-            };
+            });
+            let chrono_duration = chrono::Duration::from_std(std_duration).unwrap_or_else(|_| {
+                eprintln!("Duration '{}' is too large.", dur_str);
+                std::process::exit(EXIT_CONFIG);
+            });
+            let snooze_until = chrono::Utc::now() + chrono_duration;
 
             snooze_state.snooze(pr.url.clone(), snooze_until);
-            if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+            if let Err(e) = pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+            {
                 eprintln!("Failed to save snooze state: {}", e);
                 std::process::exit(EXIT_CONFIG);
             }
 
-            let duration_msg = match snooze_until {
-                Some(until) => format!(" until {}", until.format("%Y-%m-%d %H:%M UTC")),
-                None => " indefinitely".to_string(),
-            };
-            println!("Snoozed PR #{}{}: {}", pr.number, duration_msg, pr.title);
+            println!(
+                "Snoozed PR #{} until {}: {}",
+                pr.number,
+                snooze_until.format("%Y-%m-%d %H:%M UTC"),
+                pr.title
+            );
         }
         Commands::Unsnooze { index } => {
-            if scored_prs.is_empty() {
-                eprintln!("No snoozed pull requests found. Nothing to unsnooze.");
-                std::process::exit(EXIT_SUCCESS);
-            }
-            if index < 1 || index > scored_prs.len() {
-                eprintln!(
-                    "Invalid index {}. Must be between 1 and {}.",
-                    index,
-                    scored_prs.len()
-                );
-                std::process::exit(EXIT_CONFIG);
-            }
-
-            let (pr, _) = &scored_prs[index - 1];
+            let pr = pr_at_index(&scored_prs, index, "snoozed pull requests", "unsnooze");
             let removed = snooze_state.unsnooze(&pr.url);
             if removed {
-                if let Err(e) = pr_pal::snooze::save_snooze_state(&snooze_path, &snooze_state) {
+                if let Err(e) =
+                    pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+                {
                     eprintln!("Failed to save snooze state: {}", e);
                     std::process::exit(EXIT_CONFIG);
                 }
@@ -581,10 +566,62 @@ async fn main() {
                 eprintln!("PR #{} was not snoozed.", pr.number);
             }
         }
+        Commands::Ignore { index } => {
+            let pr = pr_at_index(&scored_prs, index, "pull requests", "ignore");
+            // One hide list per PR: an ignore replaces any snooze entry
+            snooze_state.unsnooze(&pr.url);
+            ignore_state.ignore(pr.url.clone(), chrono::Utc::now());
+            if let Err(e) = pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+            {
+                eprintln!("Failed to save ignore state: {}", e);
+                std::process::exit(EXIT_CONFIG);
+            }
+            println!("Ignored PR #{}: {}", pr.number, pr.title);
+        }
+        Commands::Unignore { index } => {
+            let pr = pr_at_index(&scored_prs, index, "ignored pull requests", "unignore");
+            if ignore_state.unignore(&pr.url) {
+                if let Err(e) =
+                    pr_pal::hide::save_hide_state(&hide_paths, &snooze_state, &ignore_state)
+                {
+                    eprintln!("Failed to save ignore state: {}", e);
+                    std::process::exit(EXIT_CONFIG);
+                }
+                println!("Unignored PR #{}: {}", pr.number, pr.title);
+            } else {
+                eprintln!("PR #{} was not ignored.", pr.number);
+            }
+        }
         Commands::Init => unreachable!("Init is handled before config loading"),
     }
 
     std::process::exit(EXIT_SUCCESS);
+}
+
+/// The PR at a 1-based index from `list`, or exit: success with a notice
+/// when the list is empty, config error when the index is out of range.
+fn pr_at_index<'a>(
+    scored_prs: &'a [(
+        pr_pal::github::types::PullRequest,
+        pr_pal::scoring::ScoreResult,
+    )],
+    index: usize,
+    list_name: &str,
+    verb: &str,
+) -> &'a pr_pal::github::types::PullRequest {
+    if scored_prs.is_empty() {
+        eprintln!("No {} found. Nothing to {}.", list_name, verb);
+        std::process::exit(EXIT_SUCCESS);
+    }
+    if index < 1 || index > scored_prs.len() {
+        eprintln!(
+            "Invalid index {}. Must be between 1 and {}.",
+            index,
+            scored_prs.len()
+        );
+        std::process::exit(EXIT_CONFIG);
+    }
+    &scored_prs[index - 1].0
 }
 
 #[cfg(test)]
@@ -598,5 +635,33 @@ mod tests {
     fn no_version_check_flag_is_accepted() {
         use clap::Parser;
         assert!(Cli::try_parse_from(["pr-pal", "--no-version-check"]).is_ok());
+    }
+
+    // Snooze means "wake me later", so a duration is mandatory. Permanent
+    // hiding is `ignore`, not an open-ended snooze.
+    #[test]
+    fn snooze_requires_a_duration() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "snooze", "1"]).is_err());
+        assert!(Cli::try_parse_from(["pr-pal", "snooze", "1", "--for", "2d"]).is_ok());
+    }
+
+    #[test]
+    fn ignore_and_unignore_take_an_index() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "ignore", "3"]).is_ok());
+        assert!(Cli::try_parse_from(["pr-pal", "unignore", "2"]).is_ok());
+        assert!(Cli::try_parse_from(["pr-pal", "ignore"]).is_err());
+        assert!(Cli::try_parse_from(["pr-pal", "unignore"]).is_err());
+    }
+
+    // One list at a time: the flags name which hidden list to show.
+    #[test]
+    fn show_ignored_conflicts_with_show_snoozed() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["pr-pal", "list", "--show-ignored"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pr-pal", "list", "--show-snoozed", "--show-ignored"]).is_err()
+        );
     }
 }

@@ -26,6 +26,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
     let client_clone = client.clone();
     let config_clone = app.config.clone();
     let snooze_clone = app.snooze_state.clone();
+    let ignore_clone = app.ignore_state.clone();
     let cache_config_clone = app.cache_config.clone();
     let verbose = app.verbose;
     let auth_username_clone = app.auth_username.clone();
@@ -37,6 +38,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                 &client_clone,
                 &config_clone,
                 &snooze_clone,
+                &ignore_clone,
                 &cache_config_clone,
                 verbose,
                 auth_username_clone.as_deref(),
@@ -166,6 +168,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                 let client_clone = client.clone();
                 let config_clone = app.config.clone();
                 let snooze_clone = app.snooze_state.clone();
+                let ignore_clone = app.ignore_state.clone();
                 let cache_config_clone = app.cache_config.clone();
                 let verbose = app.verbose;
                 let auth_username_clone = app.auth_username.clone();
@@ -177,6 +180,7 @@ pub async fn run_tui(mut app: App, mut client: octocrab::Octocrab) -> anyhow::Re
                             &client_clone,
                             &config_clone,
                             &snooze_clone,
+                            &ignore_clone,
                             &cache_config_clone,
                             verbose,
                             auth_username_clone.as_deref(),
@@ -240,14 +244,18 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
                 // Snooze
                 KeyCode::Char('s') => app.start_snooze_input(),
 
-                // Unsnooze
-                KeyCode::Char('u') => app.unsnooze_selected(),
+                // Ignore (hide for good)
+                KeyCode::Char('i') => app.ignore_selected(),
+
+                // Restore to Active
+                KeyCode::Char('u') => app.restore_selected(),
 
                 // Undo
                 KeyCode::Char('z') => app.undo_last(),
 
-                // Tab switching
-                KeyCode::Tab => app.toggle_view(),
+                // View switching
+                KeyCode::Tab => app.next_view(),
+                KeyCode::BackTab => app.previous_view(),
 
                 // Refresh (manual = force fresh data)
                 KeyCode::Char('r') => {
@@ -278,10 +286,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
                     app.snooze_input.pop();
                 }
 
-                // Character input (alphanumeric + space)
-                KeyCode::Char(c) if c.is_alphanumeric() || c == ' ' => {
-                    app.snooze_input.push(c);
-                }
+                // Character input (alphanumeric + space); `i` on an empty
+                // input ignores instead
+                KeyCode::Char(c) => app.snooze_input_char(c),
 
                 // Ignore all other keys (don't propagate to Normal mode)
                 _ => {}

@@ -3,6 +3,8 @@ pub mod config;
 pub mod credentials;
 pub mod fetch;
 pub mod github;
+pub mod hide;
+pub mod ignore;
 pub mod output;
 pub mod review_state;
 pub mod scoring;

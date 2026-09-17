@@ -49,7 +49,9 @@ Use `cargo run -- --help` for all command-line options. Press `?` in the TUI for
 
 **Multiple queries** let you track different PR sets. Each query can override global scoring rules. First-match-wins when a PR appears in multiple queries.
 
-**Snooze PRs** to hide them temporarily. Press `s` to snooze for a custom duration or indefinitely. Snoozed PRs live in a separate tab and don't clutter your main list.
+**Snooze PRs** to hide them for a while. Press `s` and enter a duration (`2h`, `3d`, `1w`); the PR moves to the Snoozed tab and comes back when the time is up.
+
+**Ignore PRs** to hide them for good, for review requests that aren't yours to handle (a team got assigned, say). Press `i`; the PR moves to the Ignored tab, oldest first, until you restore it with `u`. `Tab` cycles Active, Snoozed, and Ignored.
 
 **Review-cycle awareness** (optional) hides PRs you've already reviewed while the ball is in the author's court, then resurfaces them, tagged and optionally score-boosted, when the author pushes, you're mentioned, or your review is re-requested. A safety valve resurfaces anything quiet for too long. See [docs/configuration.md](docs/configuration.md#awaiting-author-suppression).
 

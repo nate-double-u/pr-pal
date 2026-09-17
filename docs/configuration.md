@@ -271,9 +271,18 @@ Resurfaced rows are tagged with the wake reason: `(updated)`, `(mentioned)`, `(r
 Notes:
 
 - Suppression is derived from GitHub state on each refresh; nothing is written to your snooze file. Commenting on a PR (a nudge) re-arms the safety valve.
-- Manual snooze always wins: snoozing a suppressed PR converts it into a regular snooze.
+- Manual snooze or ignore always wins: snoozing or ignoring a suppressed PR converts it into a regular snooze or ignore.
 - Omitting the `suppress` block (or `awaiting_author: false`) disables the feature.
 - `unsnooze` does not apply to suppressed PRs; they come back via wake events.
+
+## Snooze and Ignore Files
+
+Hidden PRs live in two files next to the config:
+
+- `~/.config/pr-pal/snooze.json`: timed snoozes (`s`, `snooze INDEX --for DURATION`). Same format as PR Bro.
+- `~/.config/pr-pal/ignore.json`: permanent ignores (`i`, `ignore INDEX`).
+
+A PR is in at most one of them. PR Bro and PR Pal 1.x allowed an indefinite snooze (`snooze_until: null`); PR Pal reads those entries as ignores and moves them to `ignore.json` the next time it saves.
 
 ## Theme
 

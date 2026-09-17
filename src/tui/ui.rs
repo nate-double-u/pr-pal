@@ -85,10 +85,11 @@ fn render_title(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let titles = vec!["Active", "Snoozed"];
+    let titles = vec!["Active", "Snoozed", "Ignored"];
     let selected = match app.current_view {
         View::Active => 0,
         View::Snoozed => 1,
+        View::Ignored => 2,
     };
 
     let tabs = Tabs::new(titles)
@@ -133,8 +134,49 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let selected_pos = app.table_state.selected().unwrap_or(0);
 
     // Build rows, widths, and header based on current view
-    let (rows, widths, header_cells): (Vec<Row>, Vec<Constraint>, Vec<&str>) =
-        if matches!(app.current_view, View::Snoozed) {
+    let (rows, widths, header_cells): (Vec<Row>, Vec<Constraint>, Vec<&str>) = match app
+        .current_view
+    {
+        View::Ignored => {
+            // Ignored view: a chronological record, so no score column;
+            // rows are oldest ignore first.
+            let rows: Vec<Row> = prs
+                .iter()
+                .enumerate()
+                .map(|(idx, (pr, _))| {
+                    let index = format!("{}.", idx + 1);
+                    let age = app
+                        .ignore_state
+                        .ignored_entries()
+                        .get(&pr.url)
+                        .map(|entry| entry.format_age())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let row_style = if idx % 2 == 1 {
+                        Style::default().bg(app.theme_colors.row_alt_bg)
+                    } else {
+                        Style::default()
+                    };
+
+                    Row::new(vec![
+                        Cell::from(index).style(Style::default().fg(app.theme_colors.index_color)),
+                        Cell::from(pr.title.clone()),
+                        Cell::from(age).style(Style::default().fg(app.theme_colors.muted)),
+                        Cell::from(pr.short_ref()),
+                    ])
+                    .style(row_style)
+                })
+                .collect();
+
+            let widths = vec![
+                Constraint::Length(4),  // Index
+                Constraint::Fill(1),    // Title
+                Constraint::Length(12), // Ignored: "3mo ago"
+                Constraint::Length(40), // PR ref
+            ];
+
+            (rows, widths, vec!["#", "Title", "Ignored", "PR"])
+        }
+        View::Snoozed => {
             // Snoozed view: 5 columns with Duration
             let rows: Vec<Row> = prs
                 .iter()
@@ -197,7 +239,8 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             let header = vec!["#", "Score", "Title", "Duration", "PR"];
 
             (rows, widths, header)
-        } else {
+        }
+        View::Active => {
             // Active view: 4 columns without Duration
             let rows: Vec<Row> = prs
                 .iter()
@@ -258,7 +301,8 @@ fn render_table(frame: &mut Frame, area: Rect, app: &mut App) {
             let header = vec!["#", "Score", "Title", "PR"];
 
             (rows, widths, header)
-        };
+        }
+    };
 
     let table = Table::new(rows, widths)
         .header(
@@ -296,6 +340,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             } else if msg.starts_with("Snoozed:")
                 || msg.starts_with("Unsnoozed:")
                 || msg.starts_with("Re-snoozed:")
+                || msg.starts_with("Ignored:")
+                || msg.starts_with("Unignored:")
                 || msg.starts_with("Undid")
                 || msg.starts_with("Refreshed")
                 || msg.starts_with("Opened:")
@@ -313,6 +359,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         let view_mode = match app.current_view {
             View::Active => "Active",
             View::Snoozed => "Snoozed",
+            View::Ignored => "Ignored",
         };
 
         let elapsed = app.last_refresh.elapsed();
@@ -330,6 +377,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 ("Enter", "", "", ":open "),
                 ("b", "", "", ":breakdown "),
                 ("s", "", "", ":snooze "),
+                ("i", "", "", ":ignore "),
                 ("r", "", "", ":refresh "),
                 ("Tab", "", "", ":snoozed "),
                 ("?", "", "", ":help "),
@@ -340,7 +388,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 ("Enter", "", "", ":open "),
                 ("b", "", "", ":breakdown "),
                 ("s", "", "", ":resnooze "),
+                ("i", "", "", ":ignore "),
                 ("u", "", "", ":unsnooze "),
+                ("r", "", "", ":refresh "),
+                ("Tab", "", "", ":ignored "),
+                ("?", "", "", ":help "),
+                ("q", "", "", ":quit"),
+            ],
+            View::Ignored => vec![
+                ("j", "/", "k", ":nav "),
+                ("Enter", "", "", ":open "),
+                ("s", "", "", ":snooze "),
+                ("u", "", "", ":restore "),
                 ("r", "", "", ":refresh "),
                 ("Tab", "", "", ":active "),
                 ("?", "", "", ":help "),
@@ -469,15 +528,16 @@ fn render_snooze_popup(frame: &mut Frame, app: &App) {
     let input = Paragraph::new(input_line);
     frame.render_widget(input, chunks[0]);
 
-    // Render live duration preview
+    // Render live duration preview. Empty is not an error yet, just a
+    // prompt: a snooze needs a wake time (permanent hiding is `i`).
     let parse_result = if app.snooze_input.trim().is_empty() {
-        None // Not an error, just empty = indefinite
+        None
     } else {
         Some(humantime::parse_duration(app.snooze_input.trim()))
     };
 
     let preview_text = match &parse_result {
-        None => "indefinite".to_string(),
+        None => "e.g. 2h, 3d, 1w (i to ignore)".to_string(),
         Some(Ok(d)) => humantime::format_duration(*d).to_string(),
         Some(Err(_)) => "invalid duration".to_string(),
     };
@@ -496,7 +556,7 @@ fn render_snooze_popup(frame: &mut Frame, app: &App) {
 
     // Render end time preview
     let end_time_text = match &parse_result {
-        None => "Ends: never".to_string(),
+        None => String::new(),
         Some(Ok(d)) => {
             let now = Local::now();
             let end = now + chrono::Duration::from_std(*d).unwrap_or_default();
@@ -577,9 +637,10 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         ("Enter / o", "Open PR in browser"),
         ("b", "Score breakdown"),
         ("s", "Snooze / re-snooze PR"),
-        ("u", "Unsnooze PR"),
+        ("i", "Ignore PR (hide for good)"),
+        ("u", "Unsnooze / unignore PR"),
         ("z", "Undo last action"),
-        ("Tab", "Toggle Active/Snoozed"),
+        ("Tab / Shift-Tab", "Next / previous view"),
         ("r", "Refresh PRs (bypasses cache)"),
         ("?", "Show/hide this help"),
         ("q / Ctrl-c", "Quit"),
@@ -633,11 +694,12 @@ fn render_loading_overlay(frame: &mut Frame, app: &App) {
     let spinner = spinner_chars[app.spinner_frame % 10];
 
     // Display different text based on whether this is initial load or refresh
-    let text = if app.active_prs.is_empty() && app.snoozed_prs.is_empty() {
-        format!("{} Loading PRs...", spinner)
-    } else {
-        format!("{} Refreshing...", spinner)
-    };
+    let text =
+        if app.active_prs.is_empty() && app.snoozed_prs.is_empty() && app.ignored_prs.is_empty() {
+            format!("{} Loading PRs...", spinner)
+        } else {
+            format!("{} Refreshing...", spinner)
+        };
 
     let loading_text = Paragraph::new(text)
         .alignment(Alignment::Center)

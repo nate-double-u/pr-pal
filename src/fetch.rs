@@ -2,8 +2,10 @@ use crate::buffered_eprintln;
 use crate::config::Config;
 use crate::github::cache::CacheConfig;
 use crate::github::types::PullRequest;
+use crate::hide::partition_hidden;
+use crate::ignore::IgnoreState;
 use crate::scoring::{calculate_score, merge_scoring_configs, ScoreResult, ScoringConfig};
-use crate::snooze::{partition_prs, suppress_policy, SnoozeState};
+use crate::snooze::{suppress_policy, SnoozeState};
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::{HashMap, HashSet};
@@ -26,13 +28,16 @@ impl fmt::Display for AuthError {
 impl std::error::Error for AuthError {}
 
 /// Result of a fetch: scored PR lists plus rate-limit info. Each list is
-/// sorted by score descending (ties: older PR first).
+/// sorted by score descending (ties: older PR first), except `ignored`.
 pub struct FetchedPrs {
     pub active: Vec<(PullRequest, ScoreResult)>,
     /// Reviewed PRs hidden while awaiting the author (derived state, not
     /// manually snoozed).
     pub suppressed: Vec<(PullRequest, ScoreResult)>,
     pub snoozed: Vec<(PullRequest, ScoreResult)>,
+    /// Permanently hidden, oldest ignore first. Scored (so the breakdown
+    /// still works) but never ranked by score.
+    pub ignored: Vec<(PullRequest, ScoreResult)>,
     pub rate_limit_remaining: Option<u64>,
 }
 
@@ -86,14 +91,16 @@ fn dedup_in_config_order(
 }
 
 /// Fetch PRs from all configured queries, deduplicate, score, and split into
-/// active, suppressed (awaiting author), and snoozed lists.
+/// active, suppressed (awaiting author), snoozed, and ignored lists.
 ///
 /// This function is called from main.rs for initial load and from the TUI
 /// event loop for manual/auto refresh.
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_and_score_prs(
     client: &octocrab::Octocrab,
     config: &Config,
     snooze_state: &SnoozeState,
+    ignore_state: &IgnoreState,
     cache_config: &CacheConfig,
     verbose: bool,
     auth_username: Option<&str>,
@@ -184,20 +191,22 @@ pub async fn fetch_and_score_prs(
         buffered_eprintln!("After deduplication: {} unique PRs", unique_prs.len());
     }
 
-    // Split into active / suppressed (awaiting author) / manually snoozed
-    let partitioned = partition_prs(
+    // Split into active / suppressed (awaiting author) / snoozed / ignored
+    let partitioned = partition_hidden(
         unique_prs,
         snooze_state,
+        ignore_state,
         policy.as_ref(),
         chrono::Utc::now(),
     );
 
     if verbose {
         buffered_eprintln!(
-            "After filter: {} active, {} suppressed, {} snoozed",
+            "After filter: {} active, {} suppressed, {} snoozed, {} ignored",
             partitioned.active.len(),
             partitioned.suppressed.len(),
-            partitioned.snoozed.len()
+            partitioned.snoozed.len(),
+            partitioned.ignored.len()
         );
     }
 
@@ -220,6 +229,8 @@ pub async fn fetch_and_score_prs(
     let mut active_scored = score_list(partitioned.active);
     let mut suppressed_scored = score_list(partitioned.suppressed);
     let mut snoozed_scored = score_list(partitioned.snoozed);
+    // Already in ignored_at order; scoring preserves it.
+    let ignored_scored = score_list(partitioned.ignored);
 
     // Sort both lists by score descending, then by age ascending (older first for ties)
     let sort_fn = |a: &(PullRequest, ScoreResult), b: &(PullRequest, ScoreResult)| {
@@ -249,6 +260,7 @@ pub async fn fetch_and_score_prs(
         active: active_scored,
         suppressed: suppressed_scored,
         snoozed: snoozed_scored,
+        ignored: ignored_scored,
         rate_limit_remaining,
     })
 }
@@ -297,6 +309,7 @@ mod tests {
             active: vec![],
             suppressed: vec![scored(1, 500.0), scored(2, 5.0)],
             snoozed: vec![scored(3, 50.0)],
+            ignored: vec![],
             rate_limit_remaining: None,
         };
         let numbers: Vec<u64> = fetched
