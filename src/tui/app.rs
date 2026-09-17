@@ -761,16 +761,21 @@ impl App {
         self.show_flash(format!("Ignored: {} (z to undo)", title));
     }
 
-    /// Undo the last snooze or unsnooze action
+    /// Undo the last snooze, unsnooze, ignore, or unignore. The entry stays
+    /// on the stack until its save succeeds, so a failed undo can be retried
+    /// with another `z`.
     pub fn undo_last(&mut self) {
-        let action = match self.undo_stack.pop_front() {
-            Some(action) => action,
-            None => {
-                self.show_flash("Nothing to undo".to_string());
-                return;
-            }
+        let Some(action) = self.undo_stack.front().cloned() else {
+            self.show_flash("Nothing to undo".to_string());
+            return;
         };
+        if self.apply_undo(action) {
+            self.undo_stack.pop_front();
+        }
+    }
 
+    /// Revert `action`; true once it is saved and the lists are updated.
+    fn apply_undo(&mut self, action: UndoAction) -> bool {
         match action {
             UndoAction::Snoozed {
                 url,
@@ -785,7 +790,7 @@ impl App {
                         ignore.ignore(url.clone(), at);
                     }
                 }) {
-                    return;
+                    return false;
                 }
 
                 // Re-evaluate against current signals for every removed
@@ -817,7 +822,7 @@ impl App {
                         snooze.snooze(url.clone(), until);
                     }
                 }) {
-                    return;
+                    return false;
                 }
 
                 if became_suppressed {
@@ -837,7 +842,7 @@ impl App {
             } => {
                 // Undo a re-snooze: restore the previous snooze duration
                 if !self.commit(|snooze, _| snooze.snooze(url.clone(), previous_until)) {
-                    return;
+                    return false;
                 }
 
                 // PR stays in snoozed list -- no move needed
@@ -850,7 +855,7 @@ impl App {
                         snooze.snooze(url.clone(), until);
                     }
                 }) {
-                    return;
+                    return false;
                 }
 
                 // As with undoing a snooze: re-evaluate suppression against
@@ -879,7 +884,7 @@ impl App {
                 became_suppressed,
             } => {
                 if !self.commit(|_, ignore| ignore.ignore(url.clone(), ignored_at)) {
-                    return;
+                    return false;
                 }
                 if became_suppressed {
                     self.suppressed_urls.remove(&url);
@@ -888,6 +893,7 @@ impl App {
                 self.show_flash(format!("Undid unignore: {}", title));
             }
         }
+        true
     }
 
     /// Apply `mutate` to a copy of the hide state, write both files, and
@@ -2228,5 +2234,41 @@ mod ignore_tests {
         assert!(app.undo_stack.is_empty());
 
         let _ = std::fs::remove_file(&blocker);
+    }
+
+    // LOCKED: regression for #8 review (undo_last popped the action before a save that could fail)
+    #[test]
+    fn failed_undo_save_keeps_undo_and_retry_succeeds() {
+        let name = "undo-save-fails";
+        let url = "https://x/active";
+        let mut app = app_with_active_row(name, url);
+        app.ignore_selected();
+        assert_eq!(app.undo_stack.len(), 1, "ignore recorded");
+        assert_eq!(urls(&app.ignored_prs), vec![url]);
+        let blocker = block_saves(name);
+
+        app.undo_last();
+
+        assert!(
+            flash(&app).starts_with("Failed to save"),
+            "got {:?}",
+            flash(&app)
+        );
+        assert_eq!(app.undo_stack.len(), 1, "undo entry survives the failure");
+        assert!(app.ignore_state.is_ignored(url), "memory matches disk");
+        assert_eq!(urls(&app.ignored_prs), vec![url], "row stays put");
+
+        std::fs::remove_file(&blocker).unwrap();
+        app.undo_last();
+
+        assert!(app.undo_stack.is_empty());
+        assert!(!app.ignore_state.is_ignored(url));
+        assert_eq!(urls(&app.active_prs), vec![url]);
+        assert!(
+            flash(&app).starts_with("Undid ignore:"),
+            "got {:?}",
+            flash(&app)
+        );
+        let _ = std::fs::remove_dir_all(test_dir(name));
     }
 }
