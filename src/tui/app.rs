@@ -1055,15 +1055,16 @@ impl App {
         let (snoozed_merged, suppressed_urls) = merge_snoozed_lists(snoozed, suppressed);
 
         // Wake-reason tags derived from the same effective policy that
-        // partitioning uses. Snoozed rows are included: a row that wakes
-        // while manually snoozed keeps its tag when it later moves to
-        // Active in-memory (unsnooze/undo) before the next refresh.
+        // partitioning uses. Snoozed and ignored rows are included: a row
+        // that wakes while hidden keeps its tag when it later moves to
+        // Active in-memory (u/undo) before the next refresh.
         let policy = crate::snooze::suppress_policy(self.config.suppress.as_ref())
             .ok()
             .flatten();
         let now = Utc::now();
         let mut review_states = compute_review_states(&active, policy.as_ref(), now);
         review_states.extend(compute_review_states(&snoozed_merged, policy.as_ref(), now));
+        review_states.extend(compute_review_states(&ignored, policy.as_ref(), now));
         self.review_states = review_states;
 
         // Replace PR lists
@@ -2112,6 +2113,44 @@ mod ignore_tests {
         }
 
         assert_eq!(app.snooze_input, "1w 2d");
+    }
+
+    // --- refresh ---
+
+    // LOCKED: regression for #8 review (ignored rows had no review state; wake tag lost on u)
+    // Like snoozed rows, an ignored PR can wake during a refresh. When `u`
+    // later moves it to Active in-memory, its tag must render.
+    #[test]
+    fn update_prs_computes_wake_states_for_ignored_rows() {
+        let url = "https://x/ignored-woken";
+        let mut app = test_app("wake-states-ignored");
+        app.config.suppress = Some(crate::config::SuppressConfig {
+            awaiting_author: true,
+            wake_on: vec![crate::config::WakeEvent::Push],
+            resurface_after: "21d".to_string(),
+        });
+
+        // Ignored row whose author pushed after my review.
+        let mut pr = test_pr(url);
+        pr.signals = ReviewSignals {
+            my_last_review_at: Some(Utc::now() - Duration::days(5)),
+            ..Default::default()
+        };
+        pr.signals.last_commit_at = Some(Utc::now() - Duration::days(1));
+
+        app.update_prs(crate::fetch::FetchedPrs {
+            active: vec![],
+            suppressed: vec![],
+            snoozed: vec![],
+            ignored: vec![(pr, ScoreResult::default())],
+            rate_limit_remaining: None,
+        });
+
+        assert_eq!(
+            app.review_states.get(url),
+            Some(&ReviewState::Pushed),
+            "ignored rows must carry their wake state"
+        );
     }
 
     // --- failed saves ---
