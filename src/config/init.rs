@@ -372,3 +372,7 @@ pub fn run_init_wizard(default_path: Option<PathBuf>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "init_test.rs"]
+mod tests;
