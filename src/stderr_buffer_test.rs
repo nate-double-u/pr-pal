@@ -1,5 +1,4 @@
 use super::*;
-use crate::buffered_eprintln;
 
 // BUFFER is a process-wide static, so every assertion below lives in a
 // single #[test] to guarantee sequential access regardless of how
