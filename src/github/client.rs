@@ -24,3 +24,7 @@ pub fn create_client(
     let client = builder.build().context("Failed to create GitHub client")?;
     Ok((client, cache_handle))
 }
+
+#[cfg(test)]
+#[path = "client_test.rs"]
+mod tests;
