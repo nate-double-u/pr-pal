@@ -38,3 +38,7 @@ impl PullRequest {
         format!("{}#{}", self.repo, self.number)
     }
 }
+
+#[cfg(test)]
+#[path = "types_test.rs"]
+mod tests;
