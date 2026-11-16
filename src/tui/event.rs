@@ -1,5 +1,6 @@
 use crossterm::event::{KeyEvent, KeyEventKind};
 use futures::StreamExt;
+use std::io::IsTerminal;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -18,18 +19,30 @@ impl EventHandler {
         let (tx, rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
-            let mut reader = crossterm::event::EventStream::new();
+            // There's no terminal to read key events from outside a real TTY
+            // (e.g. under `cargo test`). `EventStream::new()` itself panics
+            // ("reader source not set") when there's no real TTY to attach
+            // to, so it must not even be constructed in that case - guarding
+            // only the `.next()` poll below isn't enough.
+            let has_tty = std::io::stdin().is_terminal();
+            let mut reader = has_tty.then(crossterm::event::EventStream::new);
             let mut tick_interval =
                 tokio::time::interval(std::time::Duration::from_millis(tick_rate_ms));
             let mut refresh_interval =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
 
-            // Skip the first tick of refresh interval (it fires immediately)
+            // Skip the first tick of each interval (tokio::time::interval
+            // fires its initial tick immediately rather than after the
+            // configured duration), so the timers race fairly instead of
+            // always favoring whichever fired first at t=0.
+            tick_interval.tick().await;
             refresh_interval.tick().await;
 
             loop {
                 tokio::select! {
-                    maybe_event = reader.next() => {
+                    // `has_tty` is only true when `reader` is `Some`, so the
+                    // `unwrap()` here is safe.
+                    maybe_event = async { reader.as_mut().unwrap().next().await }, if has_tty => {
                         if let Some(Ok(crossterm::event::Event::Key(key))) = maybe_event {
                             // Filter for Press only (Windows compatibility)
                             if key.kind == KeyEventKind::Press && tx.send(Event::Key(key)).is_err() {
@@ -58,3 +71,7 @@ impl EventHandler {
         self.rx.recv().await.unwrap_or(Event::Tick)
     }
 }
+
+#[cfg(test)]
+#[path = "event_test.rs"]
+mod tests;
