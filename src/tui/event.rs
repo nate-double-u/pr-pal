@@ -20,11 +20,12 @@ impl EventHandler {
 
         tokio::spawn(async move {
             // There's no terminal to read key events from outside a real TTY
-            // (e.g. under `cargo test`). Guard the reader branch on this so it
-            // is never polled in that case, since crossterm's EventStream
-            // panics ("reader source not set") when polled without one.
+            // (e.g. under `cargo test`). `EventStream::new()` itself panics
+            // ("reader source not set") when there's no real TTY to attach
+            // to, so it must not even be constructed in that case - guarding
+            // only the `.next()` poll below isn't enough.
             let has_tty = std::io::stdin().is_terminal();
-            let mut reader = crossterm::event::EventStream::new();
+            let mut reader = has_tty.then(crossterm::event::EventStream::new);
             let mut tick_interval =
                 tokio::time::interval(std::time::Duration::from_millis(tick_rate_ms));
             let mut refresh_interval =
@@ -35,7 +36,9 @@ impl EventHandler {
 
             loop {
                 tokio::select! {
-                    maybe_event = reader.next(), if has_tty => {
+                    // `has_tty` is only true when `reader` is `Some`, so the
+                    // `unwrap()` here is safe.
+                    maybe_event = async { reader.as_mut().unwrap().next().await }, if has_tty => {
                         if let Some(Ok(crossterm::event::Event::Key(key))) = maybe_event {
                             // Filter for Press only (Windows compatibility)
                             if key.kind == KeyEventKind::Press && tx.send(Event::Key(key)).is_err() {
