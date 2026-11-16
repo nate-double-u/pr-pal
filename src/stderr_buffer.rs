@@ -33,3 +33,7 @@ macro_rules! buffered_eprintln {
         $crate::stderr_buffer::warn(format!($($arg)*))
     };
 }
+
+#[cfg(test)]
+#[path = "stderr_buffer_test.rs"]
+mod tests;
