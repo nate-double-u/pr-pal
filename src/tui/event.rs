@@ -1,5 +1,6 @@
 use crossterm::event::{KeyEvent, KeyEventKind};
 use futures::StreamExt;
+use std::io::IsTerminal;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,11 @@ impl EventHandler {
         let (tx, rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
+            // There's no terminal to read key events from outside a real TTY
+            // (e.g. under `cargo test`). Guard the reader branch on this so it
+            // is never polled in that case, since crossterm's EventStream
+            // panics ("reader source not set") when polled without one.
+            let has_tty = std::io::stdin().is_terminal();
             let mut reader = crossterm::event::EventStream::new();
             let mut tick_interval =
                 tokio::time::interval(std::time::Duration::from_millis(tick_rate_ms));
@@ -29,7 +35,7 @@ impl EventHandler {
 
             loop {
                 tokio::select! {
-                    maybe_event = reader.next() => {
+                    maybe_event = reader.next(), if has_tty => {
                         if let Some(Ok(crossterm::event::Event::Key(key))) = maybe_event {
                             // Filter for Press only (Windows compatibility)
                             if key.kind == KeyEventKind::Press && tx.send(Event::Key(key)).is_err() {

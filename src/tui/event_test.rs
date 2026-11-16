@@ -19,6 +19,10 @@ async fn tick_events_fire_before_a_far_off_refresh() {
     }
 }
 
+// LOCKED: regression for pr-pal#21 (crossterm's EventStream panics with
+// "reader source not set" when polled without a real TTY, e.g. under
+// `cargo test`, which previously killed the spawned task and starved the
+// refresh timer).
 #[tokio::test(start_paused = true)]
 async fn refresh_event_fires_after_the_configured_interval() {
     // Tick effectively disabled, refresh set to the minimum interval so it
