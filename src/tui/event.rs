@@ -31,7 +31,11 @@ impl EventHandler {
             let mut refresh_interval =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
 
-            // Skip the first tick of refresh interval (it fires immediately)
+            // Skip the first tick of each interval (tokio::time::interval
+            // fires its initial tick immediately rather than after the
+            // configured duration), so the timers race fairly instead of
+            // always favoring whichever fired first at t=0.
+            tick_interval.tick().await;
             refresh_interval.tick().await;
 
             loop {
