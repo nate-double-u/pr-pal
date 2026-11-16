@@ -310,3 +310,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "handle_key_event_test.rs"]
+mod tests;
