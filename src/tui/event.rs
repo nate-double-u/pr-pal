@@ -58,3 +58,7 @@ impl EventHandler {
         self.rx.recv().await.unwrap_or(Event::Tick)
     }
 }
+
+#[cfg(test)]
+#[path = "event_test.rs"]
+mod tests;
