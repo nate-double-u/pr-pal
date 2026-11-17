@@ -1,5 +1,5 @@
-use super::*;
 use super::test_support::with_token_env;
+use super::*;
 
 // LOCKED: merge guard for the pr-pal token env var (PR #6). The fork
 // reads PR_PAL_GH_TOKEN; an upstream merge must not revert it to
