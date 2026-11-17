@@ -51,3 +51,7 @@ pub fn setup_token_if_missing() -> Result<String> {
 
     Ok(token)
 }
+
+#[cfg(test)]
+#[path = "prompt_test.rs"]
+mod tests;
