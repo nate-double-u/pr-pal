@@ -1456,3 +1456,13 @@ mod tests {
         assert_eq!(pr.signals.mentioned_at, None);
     }
 }
+
+// `apply_size_exclusions` had zero direct unit coverage: it was only
+// exercised indirectly through `enrich_pr`'s mocked HTTP file-list fetch
+// tests above, with nothing asserting its glob-matching or
+// additions+deletions summing behavior directly. Kept in its own file
+// (rather than inside `mod tests` above) so it doesn't need the wiremock
+// fixtures that module already carries.
+#[cfg(test)]
+#[path = "search_size_exclusions_test.rs"]
+mod size_exclusions_tests;
