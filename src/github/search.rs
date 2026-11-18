@@ -1455,54 +1455,14 @@ mod tests {
         assert_eq!(pr.signals.last_commit_at, None);
         assert_eq!(pr.signals.mentioned_at, None);
     }
-
-    // `apply_size_exclusions` had zero unit coverage: it's only exercised
-    // indirectly through `enrich_pr`'s file-list fetch, so a regression in
-    // the glob matching or the additions+deletions sum would only surface
-    // as a wrong PR size in the scoring engine, not as a test failure here.
-    fn file(name: &str, additions: u64, deletions: u64) -> (String, u64, u64) {
-        (name.to_string(), additions, deletions)
-    }
-
-    #[test]
-    fn size_exclusions_sums_all_files_when_no_patterns_given() {
-        let files = vec![file("src/main.rs", 10, 2), file("Cargo.lock", 100, 50)];
-        let total = apply_size_exclusions(&files, &[]).expect("no patterns should not error");
-        assert_eq!(total, 162);
-    }
-
-    #[test]
-    fn size_exclusions_excludes_files_matching_a_pattern() {
-        let files = vec![file("src/main.rs", 10, 2), file("Cargo.lock", 100, 50)];
-        let total = apply_size_exclusions(&files, &["*.lock".to_string()])
-            .expect("valid pattern should not error");
-        assert_eq!(total, 12);
-    }
-
-    #[test]
-    fn size_exclusions_match_on_basename_not_full_path() {
-        // The pattern has no path separators, so it must match against the
-        // file's basename even when the file lives in a subdirectory.
-        let files = vec![
-            file("vendor/pkg/Cargo.lock", 100, 50),
-            file("src/lib.rs", 3, 1),
-        ];
-        let total = apply_size_exclusions(&files, &["*.lock".to_string()])
-            .expect("valid pattern should not error");
-        assert_eq!(total, 4);
-    }
-
-    #[test]
-    fn size_exclusions_empty_file_list_is_zero() {
-        let total = apply_size_exclusions(&[], &["*.lock".to_string()])
-            .expect("empty file list should not error");
-        assert_eq!(total, 0);
-    }
-
-    #[test]
-    fn size_exclusions_invalid_glob_pattern_errors() {
-        let files = vec![file("src/main.rs", 10, 2)];
-        let result = apply_size_exclusions(&files, &["[".to_string()]);
-        assert!(result.is_err(), "unterminated glob class should error");
-    }
 }
+
+// `apply_size_exclusions` had zero direct unit coverage: it was only
+// exercised indirectly through `enrich_pr`'s mocked HTTP file-list fetch
+// tests above, with nothing asserting its glob-matching or
+// additions+deletions summing behavior directly. Kept in its own file
+// (rather than inside `mod tests` above) so it doesn't need the wiremock
+// fixtures that module already carries.
+#[cfg(test)]
+#[path = "search_size_exclusions_test.rs"]
+mod size_exclusions_tests;
