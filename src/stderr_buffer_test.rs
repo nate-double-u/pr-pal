@@ -26,11 +26,12 @@ fn buffering_lifecycle() {
 
     activate();
     assert_eq!(drain(), Vec::<String>::new());
-}
 
-#[test]
-fn buffered_eprintln_macro_routes_through_warn() {
-    drain();
+    // buffered_eprintln! routes through warn() while buffering is active.
+    // This assertion must stay inside buffering_lifecycle (not its own
+    // #[test]): BUFFER is a process-wide static, and cargo test runs
+    // #[test] functions in parallel by default, so a second test touching
+    // BUFFER concurrently can steal/deactivate the buffer mid-assertion.
     activate();
     buffered_eprintln!("{} {}", "hello", 42);
     assert_eq!(drain(), vec!["hello 42".to_string()]);
