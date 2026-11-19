@@ -624,6 +624,13 @@ fn pr_at_index<'a>(
     &scored_prs[index - 1].0
 }
 
+// `pr_at_index` is covered in a separate test file (see below), following
+// the `#[path = "..._test.rs"] mod tests;` convention used by the rest of
+// this repo's modules.
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod pr_at_index_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
