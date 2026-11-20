@@ -247,18 +247,13 @@ mod tests {
             title: "Fix login bug".to_string(),
             number: 123,
             author: "octocat".to_string(),
-            repo: "owner/repo".to_string(),
             url: "https://github.com/owner/repo/pull/123".to_string(),
             created_at: Utc::now() - Duration::hours(5),
             updated_at: Utc::now() - Duration::hours(1),
             additions: 50,
             deletions: 10,
             approvals: 1,
-            draft: false,
-            labels: vec![],
-            user_has_reviewed: false,
-            filtered_size: None,
-            signals: Default::default(),
+            ..crate::test_support::base_pull_request()
         }
     }
 

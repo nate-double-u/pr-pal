@@ -153,18 +153,8 @@ mod tests {
             title: format!("PR #{}", number),
             number,
             author: "test-author".to_string(),
-            repo: "owner/repo".to_string(),
             url: url.to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            additions: 10,
-            deletions: 5,
-            approvals: 0,
-            draft: false,
-            labels: vec![],
-            user_has_reviewed: false,
-            filtered_size: None,
-            signals: Default::default(),
+            ..crate::test_support::base_pull_request()
         }
     }
 

@@ -273,21 +273,12 @@ mod tests {
 
     fn sample_pr(age_hours: i64, approvals: u32, size: u64) -> PullRequest {
         PullRequest {
-            title: "Test PR".to_string(),
-            number: 1,
             author: "user".to_string(),
-            repo: "owner/repo".to_string(),
-            url: "https://github.com/owner/repo/pull/1".to_string(),
             created_at: Utc::now() - ChronoDuration::hours(age_hours),
-            updated_at: Utc::now(),
             additions: size / 2,
             deletions: size / 2,
             approvals,
-            draft: false,
-            labels: vec![],
-            user_has_reviewed: false,
-            filtered_size: None,
-            signals: Default::default(),
+            ..crate::test_support::base_pull_request()
         }
     }
 
