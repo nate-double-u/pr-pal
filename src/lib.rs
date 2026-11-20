@@ -10,4 +10,5 @@ pub mod review_state;
 pub mod scoring;
 pub mod snooze;
 pub mod stderr_buffer;
+pub mod test_support;
 pub mod tui;

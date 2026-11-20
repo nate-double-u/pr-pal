@@ -5,21 +5,12 @@ use super::*;
 // the happy-path (valid 1-based index) is unit-testable here.
 fn test_pr(number: u64) -> pr_pal::github::types::PullRequest {
     pr_pal::github::types::PullRequest {
-        title: "Test PR".to_string(),
         number,
         author: "octocat".to_string(),
-        repo: "owner/repo".to_string(),
         url: format!("https://github.com/owner/repo/pull/{}", number),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
         additions: 0,
         deletions: 0,
-        approvals: 0,
-        draft: false,
-        labels: Vec::new(),
-        user_has_reviewed: false,
-        filtered_size: None,
-        signals: Default::default(),
+        ..pr_pal::test_support::base_pull_request()
     }
 }
 

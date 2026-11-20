@@ -1142,20 +1142,14 @@ mod tests {
     fn test_pr(url: &str, signals: ReviewSignals) -> PullRequest {
         PullRequest {
             title: format!("PR {}", url),
-            number: 1,
-            author: "author".to_string(),
             repo: "o/r".to_string(),
             url: url.to_string(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
             additions: 1,
             deletions: 1,
-            approvals: 0,
-            draft: false,
-            labels: vec![],
-            user_has_reviewed: false,
-            filtered_size: None,
             signals,
+            ..crate::test_support::base_pull_request()
         }
     }
 
@@ -1661,20 +1655,13 @@ mod ignore_tests {
     fn test_pr(url: &str) -> PullRequest {
         PullRequest {
             title: format!("PR {}", url),
-            number: 1,
-            author: "author".to_string(),
             repo: "o/r".to_string(),
             url: url.to_string(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
             additions: 1,
             deletions: 1,
-            approvals: 0,
-            draft: false,
-            labels: vec![],
-            user_has_reviewed: false,
-            filtered_size: None,
-            signals: ReviewSignals::default(),
+            ..crate::test_support::base_pull_request()
         }
     }
 
