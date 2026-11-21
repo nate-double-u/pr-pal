@@ -249,7 +249,6 @@ impl Drop for DiskCacheWriter {
     }
 }
 
-
 #[cfg(test)]
 #[path = "cache_test.rs"]
 mod tests;
